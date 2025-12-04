@@ -1,0 +1,12 @@
+# Secrets - never commit these
+config.py
+.streamlit/secrets.toml
+
+# Python
+__pycache__/
+*.py[cod]
+.env
+
+# OS
+.DS_Store
+~$*
