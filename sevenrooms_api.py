@@ -7,28 +7,37 @@ import requests
 import os
 from datetime import datetime, timedelta
 
-# Try to load from config.py (local dev), fall back to env vars / streamlit secrets
-try:
-    from config import CLIENT_ID, CLIENT_SECRET, API_BASE_URL
-except ImportError:
-    # Running on Streamlit Cloud - use secrets
+
+def _get_credentials():
+    """Get credentials from config.py, streamlit secrets, or env vars"""
+    # Try config.py first (local dev)
+    try:
+        from config import CLIENT_ID, CLIENT_SECRET, API_BASE_URL
+        return CLIENT_ID, CLIENT_SECRET, API_BASE_URL
+    except ImportError:
+        pass
+
+    # Try Streamlit secrets (cloud deployment)
     try:
         import streamlit as st
-        CLIENT_ID = st.secrets["sevenrooms_client_id"]
-        CLIENT_SECRET = st.secrets["sevenrooms_client_secret"]
-        API_BASE_URL = "https://api.sevenrooms.com/2_2"
-    except:
-        # Fall back to environment variables
-        CLIENT_ID = os.environ.get("SEVENROOMS_CLIENT_ID", "")
-        CLIENT_SECRET = os.environ.get("SEVENROOMS_CLIENT_SECRET", "")
-        API_BASE_URL = os.environ.get("SEVENROOMS_API_URL", "https://api.sevenrooms.com/2_2")
+        client_id = st.secrets.get("sevenrooms_client_id")
+        client_secret = st.secrets.get("sevenrooms_client_secret")
+        if client_id and client_secret:
+            return client_id, client_secret, "https://api.sevenrooms.com/2_2"
+    except Exception:
+        pass
+
+    # Fall back to environment variables
+    return (
+        os.environ.get("SEVENROOMS_CLIENT_ID", ""),
+        os.environ.get("SEVENROOMS_CLIENT_SECRET", ""),
+        os.environ.get("SEVENROOMS_API_URL", "https://api.sevenrooms.com/2_2")
+    )
 
 
 class SevenRoomsClient:
     def __init__(self):
-        self.client_id = CLIENT_ID
-        self.client_secret = CLIENT_SECRET
-        self.base_url = API_BASE_URL
+        self.client_id, self.client_secret, self.base_url = _get_credentials()
         self.token = None
         self.token_expiry = None
 
