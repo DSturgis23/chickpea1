@@ -14,9 +14,9 @@ except ImportError:
     # Running on Streamlit Cloud - use secrets
     try:
         import streamlit as st
-        CLIENT_ID = st.secrets["sevenrooms"]["client_id"]
-        CLIENT_SECRET = st.secrets["sevenrooms"]["client_secret"]
-        API_BASE_URL = st.secrets.get("sevenrooms", {}).get("api_base_url", "https://api.sevenrooms.com/2_2")
+        CLIENT_ID = st.secrets["sevenrooms_client_id"]
+        CLIENT_SECRET = st.secrets["sevenrooms_client_secret"]
+        API_BASE_URL = "https://api.sevenrooms.com/2_2"
     except:
         # Fall back to environment variables
         CLIENT_ID = os.environ.get("SEVENROOMS_CLIENT_ID", "")
