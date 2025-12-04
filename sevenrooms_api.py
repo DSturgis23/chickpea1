@@ -4,8 +4,24 @@ Handles authentication and data fetching from SevenRooms
 """
 
 import requests
+import os
 from datetime import datetime, timedelta
-from config import CLIENT_ID, CLIENT_SECRET, API_BASE_URL
+
+# Try to load from config.py (local dev), fall back to env vars / streamlit secrets
+try:
+    from config import CLIENT_ID, CLIENT_SECRET, API_BASE_URL
+except ImportError:
+    # Running on Streamlit Cloud - use secrets
+    try:
+        import streamlit as st
+        CLIENT_ID = st.secrets["sevenrooms"]["client_id"]
+        CLIENT_SECRET = st.secrets["sevenrooms"]["client_secret"]
+        API_BASE_URL = st.secrets.get("sevenrooms", {}).get("api_base_url", "https://api.sevenrooms.com/2_2")
+    except:
+        # Fall back to environment variables
+        CLIENT_ID = os.environ.get("SEVENROOMS_CLIENT_ID", "")
+        CLIENT_SECRET = os.environ.get("SEVENROOMS_CLIENT_SECRET", "")
+        API_BASE_URL = os.environ.get("SEVENROOMS_API_URL", "https://api.sevenrooms.com/2_2")
 
 
 class SevenRoomsClient:
