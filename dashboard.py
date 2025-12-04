@@ -112,6 +112,34 @@ if 'time_slot_iso' in df.columns:
     df['time'] = pd.to_datetime(df['time_slot_iso'], errors='coerce').dt.strftime('%H:%M')
 if 'phone_number' in df.columns:
     df['phone'] = df['phone_number']
+if 'venue_seating_area_name' in df.columns:
+    df['seating_area'] = df['venue_seating_area_name'].fillna('-')
+if 'reservation_type' in df.columns:
+    df['occasion'] = df['reservation_type'].fillna('')
+if 'status_display' in df.columns:
+    df['status'] = df['status_display'].fillna('Unknown')
+if 'shift_category' in df.columns:
+    # Map shift categories - handle 'DAY' by looking at time
+    def map_meal_period(row):
+        shift = str(row.get('shift_category', '')).upper()
+        if shift in ['BREAKFAST']:
+            return 'Breakfast'
+        elif shift in ['LUNCH']:
+            return 'Lunch'
+        elif shift in ['DINNER']:
+            return 'Dinner'
+        elif shift == 'DAY':
+            # Determine from time - before 15:00 is Lunch, after is Dinner
+            time_str = row.get('time_slot_iso', '')
+            if time_str:
+                try:
+                    hour = int(str(time_str).split(':')[0])
+                    return 'Lunch' if hour < 15 else 'Dinner'
+                except:
+                    pass
+            return 'Lunch'  # Default DAY to Lunch
+        return 'Other'
+    df['meal_period'] = df.apply(map_meal_period, axis=1)
 
 # Combine notes
 df['all_notes'] = df.apply(lambda r: ' | '.join(filter(None, [str(r.get('notes') or ''), str(r.get('client_requests') or '')])), axis=1)
@@ -154,8 +182,15 @@ else:
     selected_date = today
     st.sidebar.warning("No future reservations found")
 
+# Hide cancelled bookings (default: checked)
+hide_cancelled = st.sidebar.checkbox("Hide cancelled bookings", value=True)
+
 # === APPLY FILTERS ===
 df_filtered = df.copy()
+
+# Filter out cancelled bookings if checkbox is checked
+if hide_cancelled and 'status' in df_filtered.columns:
+    df_filtered = df_filtered[df_filtered['status'] != 'Canceled']
 
 # Debug info
 st.sidebar.caption(f"Total loaded: {len(df)} | Selected: {selected_date} | Venue: {selected_venue}")
@@ -180,28 +215,48 @@ st.subheader(f"Overview - {selected_date.strftime('%A %d %B %Y')}")
 if selected_venue != "All Pubs":
     st.caption(f"Showing: {selected_venue}")
 
-col1, col2, col3 = st.columns(3)
-with col1:
-    st.metric("Reservations", len(df_filtered))
-with col2:
-    covers = int(df_filtered['party_size'].sum()) if 'party_size' in df_filtered.columns else 0
-    st.metric("Total Covers", covers)
-with col3:
-    if 'all_notes' in df_filtered.columns:
-        with_notes = len(df_filtered[df_filtered['all_notes'].str.len() > 0])
-        st.metric("With Notes", with_notes)
-    else:
-        st.metric("With Notes", 0)
+# Calculate meal period breakdown
+total_res = len(df_filtered)
+total_covers = int(df_filtered['party_size'].sum()) if 'party_size' in df_filtered.columns else 0
+
+if 'meal_period' in df_filtered.columns:
+    meal_stats = []
+    for period in ['Breakfast', 'Lunch', 'Dinner']:
+        period_df = df_filtered[df_filtered['meal_period'] == period]
+        meal_stats.append({
+            'Period': period,
+            'Reservations': len(period_df),
+            'Covers': int(period_df['party_size'].sum()) if 'party_size' in period_df.columns else 0
+        })
+    # Add total row
+    meal_stats.insert(0, {'Period': 'Total', 'Reservations': total_res, 'Covers': total_covers})
+
+    # Display as table
+    meal_df = pd.DataFrame(meal_stats)
+    st.dataframe(meal_df, use_container_width=True, hide_index=True)
+else:
+    col1, col2 = st.columns(2)
+    with col1:
+        st.metric("Reservations", total_res)
+    with col2:
+        st.metric("Covers", total_covers)
+
+# Notes count
+if 'all_notes' in df_filtered.columns:
+    with_notes = len(df_filtered[df_filtered['all_notes'].str.len() > 0])
+    if with_notes > 0:
+        st.caption(f"{with_notes} booking(s) with notes")
 
 # === HELPER FUNCTIONS FOR DISPLAY SECTIONS ===
 def show_reservations_table():
     st.subheader("All Reservations")
-    display_cols = ['venue_name', 'time', 'guest_name', 'party_size', 'table', 'all_notes', 'phone']
+    display_cols = ['venue_name', 'time', 'guest_name', 'party_size', 'seating_area', 'table', 'all_notes', 'phone']
     display_cols = [c for c in display_cols if c in df_filtered.columns]
+    col_names = ['Pub', 'Time', 'Guest', 'Covers', 'Area', 'Table', 'Notes', 'Phone']
 
     if len(df_filtered) > 0 and display_cols:
         df_display = df_filtered[display_cols].copy()
-        df_display.columns = ['Pub', 'Time', 'Guest', 'Covers', 'Table', 'Notes', 'Phone'][:len(display_cols)]
+        df_display.columns = col_names[:len(display_cols)]
         df_display = df_display.sort_values('Time' if 'Time' in df_display.columns else df_display.columns[0])
         st.dataframe(df_display, use_container_width=True, hide_index=True)
 
@@ -212,7 +267,7 @@ def show_reservations_table():
 
 def show_alerts():
     st.subheader("Alerts")
-    alert_col1, alert_col2 = st.columns(2)
+    alert_col1, alert_col2, alert_col3 = st.columns(3)
 
     with alert_col1:
         st.markdown("**Potential Clashes**")
@@ -290,18 +345,58 @@ def show_alerts():
         else:
             st.info("No notes data")
 
+    with alert_col3:
+        st.markdown("**Special Occasions**")
+        if 'occasion' in df_filtered.columns:
+            occasions = df_filtered[df_filtered['occasion'].str.len() > 0]
+            if len(occasions) > 0:
+                for _, row in occasions.head(5).iterrows():
+                    guest = row.get('guest_name', 'Guest')
+                    venue = row.get('venue_name', '')
+                    time = row.get('time', '')
+                    occasion = row.get('occasion', '')
+                    st.info(f"**{occasion}**: {guest} ({venue} @ {time})")
+                if len(occasions) > 5:
+                    st.caption(f"...and {len(occasions) - 5} more")
+            else:
+                st.success("No special occasions")
+        else:
+            st.info("No occasion data")
+
 # === DISPLAY SECTIONS ===
 if selected_venue == "All Pubs":
     # All Pubs view: Bookings by Pub -> Alerts -> Reservations
     if 'venue_name' in df_filtered.columns and len(df_filtered) > 0:
         st.subheader("Bookings by Pub")
-        pub_stats = df_filtered.groupby('venue_name').agg(
-            Reservations=('venue_name', 'count'),
-            Covers=('party_size', 'sum')
-        ).reset_index()
-        pub_stats.columns = ['Pub', 'Reservations', 'Covers']
-        pub_stats['Covers'] = pub_stats['Covers'].astype(int)
-        pub_stats = pub_stats.sort_values('Covers', ascending=False)
+
+        # Build comprehensive stats by pub with meal period breakdown
+        pub_list = []
+        for venue in df_filtered['venue_name'].unique():
+            venue_df = df_filtered[df_filtered['venue_name'] == venue]
+            row = {'Pub': venue}
+
+            # Total
+            row['Total Res'] = len(venue_df)
+            row['Total Covers'] = int(venue_df['party_size'].sum()) if 'party_size' in venue_df.columns else 0
+
+            # By meal period
+            if 'meal_period' in venue_df.columns:
+                for period in ['Breakfast', 'Lunch', 'Dinner']:
+                    period_df = venue_df[venue_df['meal_period'] == period]
+                    row[f'{period} Res'] = len(period_df)
+                    row[f'{period} Covers'] = int(period_df['party_size'].sum()) if 'party_size' in period_df.columns else 0
+
+            pub_list.append(row)
+
+        pub_stats = pd.DataFrame(pub_list)
+        pub_stats = pub_stats.sort_values('Total Covers', ascending=False)
+
+        # Reorder columns
+        col_order = ['Pub', 'Total Res', 'Total Covers']
+        if 'meal_period' in df_filtered.columns:
+            col_order += ['Breakfast Res', 'Breakfast Covers', 'Lunch Res', 'Lunch Covers', 'Dinner Res', 'Dinner Covers']
+        pub_stats = pub_stats[[c for c in col_order if c in pub_stats.columns]]
+
         st.dataframe(pub_stats, use_container_width=True, hide_index=True)
 
     show_alerts()
