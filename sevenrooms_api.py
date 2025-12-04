@@ -74,39 +74,61 @@ class SevenRoomsClient:
             "Content-Type": "application/json"
         }
 
-    def get_reservations(self, since_date=None, venue_id=None):
+    def get_reservations(self, from_date=None, to_date=None, venue_id=None, since_date=None):
         """
-        Fetch reservations from SevenRooms
+        Fetch all reservations from SevenRooms (handles pagination)
 
         Args:
-            since_date: datetime or string (YYYY-MM-DD) - fetch reservations updated since this date
+            from_date: datetime or string (YYYY-MM-DD) - fetch reservations from this date
+            to_date: datetime or string (YYYY-MM-DD) - fetch reservations up to this date
             venue_id: Optional venue ID to filter by
+            since_date: Legacy parameter, ignored if from_date is provided
         """
         if not self._ensure_authenticated():
             return None
 
-        if since_date is None:
-            since_date = datetime.now() - timedelta(days=30)
+        # Default to today through 90 days out
+        if from_date is None:
+            from_date = datetime.now()
+        if to_date is None:
+            to_date = datetime.now() + timedelta(days=90)
 
-        if isinstance(since_date, datetime):
-            since_date = since_date.strftime("%Y-%m-%d")
+        if isinstance(from_date, datetime):
+            from_date = from_date.strftime("%Y-%m-%d")
+        if isinstance(to_date, datetime):
+            to_date = to_date.strftime("%Y-%m-%d")
 
         url = f"{self.base_url}/reservations"
-        params = {"updated_since": since_date}
+        params = {"from_date": from_date, "to_date": to_date, "limit": 400}
 
         if venue_id:
             params["venue_id"] = venue_id
 
-        try:
-            response = requests.get(url, headers=self._get_headers(), params=params, timeout=60)
-            response.raise_for_status()
-            return response.json()
+        all_reservations = []
+        cursor = None
 
-        except requests.exceptions.RequestException as e:
-            print(f"Failed to fetch reservations: {e}")
-            if hasattr(e, 'response') and e.response is not None:
-                print(f"Response: {e.response.text}")
-            return None
+        while True:
+            if cursor:
+                params["cursor"] = cursor
+
+            try:
+                response = requests.get(url, headers=self._get_headers(), params=params, timeout=60)
+                response.raise_for_status()
+                data = response.json()
+
+                results = data.get("data", {}).get("results", [])
+                all_reservations.extend(results)
+
+                # Check for more pages
+                cursor = data.get("data", {}).get("cursor")
+                if not cursor:
+                    break
+
+            except requests.exceptions.RequestException as e:
+                print(f"Failed to fetch reservations: {e}")
+                break
+
+        return {"status": 200, "data": {"results": all_reservations}}
 
     def get_reservations_export(self, since_date=None):
         """

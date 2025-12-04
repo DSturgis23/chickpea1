@@ -68,9 +68,10 @@ def load_data():
     venues_resp = client.get_venues()
     venues = venues_resp.get("data", {}).get("results", []) if venues_resp else []
 
-    # Fetch from yesterday to catch any recent updates, filter to future later
-    since = datetime.now() - timedelta(days=1)
-    res_resp = client.get_reservations(since_date=since)
+    # Fetch reservations from today through 90 days out
+    from_date = datetime.now()
+    to_date = datetime.now() + timedelta(days=90)
+    res_resp = client.get_reservations(from_date=from_date, to_date=to_date)
     reservations = res_resp.get("data", {}).get("results", []) if res_resp else []
 
     return venues, reservations
@@ -106,7 +107,7 @@ if 'first_name' in df.columns:
 if 'max_guests' in df.columns:
     df['party_size'] = pd.to_numeric(df['max_guests'], errors='coerce').fillna(0).astype(int)
 if 'table_numbers' in df.columns:
-    df['table'] = df['table_numbers'].apply(lambda x: ', '.join(x) if isinstance(x, list) else str(x) if x else '-')
+    df['table'] = df['table_numbers'].apply(lambda x: ', '.join(x) if isinstance(x, list) and len(x) > 0 else '-')
 if 'time_slot_iso' in df.columns:
     df['time'] = pd.to_datetime(df['time_slot_iso'], errors='coerce').dt.strftime('%H:%M')
 if 'phone_number' in df.columns:
@@ -192,80 +193,123 @@ with col3:
     else:
         st.metric("With Notes", 0)
 
-# === BOOKINGS BY PUB (only on All Pubs view) ===
-if selected_venue == "All Pubs" and 'venue_name' in df_filtered.columns and len(df_filtered) > 0:
-    st.subheader("Bookings by Pub")
+# === HELPER FUNCTIONS FOR DISPLAY SECTIONS ===
+def show_reservations_table():
+    st.subheader("All Reservations")
+    display_cols = ['venue_name', 'time', 'guest_name', 'party_size', 'table', 'all_notes', 'phone']
+    display_cols = [c for c in display_cols if c in df_filtered.columns]
 
-    # Aggregate both reservations count and covers
-    pub_stats = df_filtered.groupby('venue_name').agg(
-        Reservations=('venue_name', 'count'),
-        Covers=('party_size', 'sum')
-    ).reset_index()
-    pub_stats.columns = ['Pub', 'Reservations', 'Covers']
-    pub_stats['Covers'] = pub_stats['Covers'].astype(int)
-    pub_stats = pub_stats.sort_values('Covers', ascending=False)
+    if len(df_filtered) > 0 and display_cols:
+        df_display = df_filtered[display_cols].copy()
+        df_display.columns = ['Pub', 'Time', 'Guest', 'Covers', 'Table', 'Notes', 'Phone'][:len(display_cols)]
+        df_display = df_display.sort_values('Time' if 'Time' in df_display.columns else df_display.columns[0])
+        st.dataframe(df_display, use_container_width=True, hide_index=True)
 
-    # Display table
-    st.dataframe(pub_stats, use_container_width=True, hide_index=True)
+        csv = df_display.to_csv(index=False)
+        st.download_button("Download CSV", csv, f"reservations_{selected_date}.csv", "text/csv")
+    else:
+        st.info("No reservations for the selected filters.")
 
-# === ALERTS ===
-st.subheader("Alerts")
-alert_col1, alert_col2 = st.columns(2)
+def show_alerts():
+    st.subheader("Alerts")
+    alert_col1, alert_col2 = st.columns(2)
 
-with alert_col1:
-    st.markdown("**Potential Clashes**")
-    if 'table' in df_filtered.columns and 'time' in df_filtered.columns and len(df_filtered) > 0:
-        clash_cols = ['venue_name', 'table', 'time'] if 'venue_name' in df_filtered.columns else ['table', 'time']
-        clash_df = df_filtered[df_filtered['table'] != '-'].copy()
-        if len(clash_df) > 0:
-            clash_check = clash_df.groupby(clash_cols).size().reset_index(name='count')
-            clashes = clash_check[clash_check['count'] > 1]
-            if len(clashes) > 0:
-                st.error(f"Found {len(clashes)} potential double-bookings!")
-                for _, clash in clashes.iterrows():
-                    venue = clash.get('venue_name', '')
-                    st.write(f"- **{venue}**: Table {clash['table']} at {clash['time']}")
+    with alert_col1:
+        st.markdown("**Potential Clashes**")
+        if 'table' in df_filtered.columns and 'time' in df_filtered.columns and len(df_filtered) > 0:
+            clash_df = df_filtered[df_filtered['table'] != '-'].copy()
+            if len(clash_df) > 0:
+                # Calculate end times using duration (default 90 mins if not available)
+                if 'duration' in clash_df.columns:
+                    clash_df['duration_mins'] = pd.to_numeric(clash_df['duration'], errors='coerce').fillna(90)
+                else:
+                    clash_df['duration_mins'] = 90
+
+                # Parse start time to minutes since midnight for easier comparison
+                clash_df['start_mins'] = clash_df['time'].apply(
+                    lambda t: int(t.split(':')[0]) * 60 + int(t.split(':')[1]) if pd.notna(t) and ':' in str(t) else 0
+                )
+                clash_df['end_mins'] = clash_df['start_mins'] + clash_df['duration_mins']
+
+                # Find overlapping bookings on same table at same venue
+                clashes_found = []
+                venue_col = 'venue_name' if 'venue_name' in clash_df.columns else None
+
+                for table in clash_df['table'].unique():
+                    table_df = clash_df[clash_df['table'] == table]
+                    if venue_col:
+                        for venue in table_df[venue_col].unique():
+                            venue_table_df = table_df[table_df[venue_col] == venue].sort_values('start_mins')
+                            # Check consecutive bookings for overlap
+                            for i in range(len(venue_table_df) - 1):
+                                curr = venue_table_df.iloc[i]
+                                next_row = venue_table_df.iloc[i + 1]
+                                if curr['end_mins'] > next_row['start_mins']:
+                                    clashes_found.append({
+                                        'venue': venue,
+                                        'table': table,
+                                        'booking1': f"{curr['time']} ({curr.get('guest_name', 'Guest')})",
+                                        'booking2': f"{next_row['time']} ({next_row.get('guest_name', 'Guest')})"
+                                    })
+
+                if clashes_found:
+                    st.error(f"Found {len(clashes_found)} potential double-bookings!")
+                    clash_table = pd.DataFrame([
+                        {
+                            '#': i + 1,
+                            'Pub': c['venue'],
+                            'Table': c['table'],
+                            'Booking 1': c['booking1'],
+                            'Booking 2': c['booking2']
+                        }
+                        for i, c in enumerate(clashes_found)
+                    ])
+                    st.dataframe(clash_table, use_container_width=True, hide_index=True)
+                else:
+                    st.success("No clashes detected")
             else:
                 st.success("No clashes detected")
         else:
-            st.success("No clashes detected")
-    else:
-        st.info("No table data for clash detection")
+            st.info("No table data for clash detection")
 
-with alert_col2:
-    st.markdown("**Bookings with Notes**")
-    if 'all_notes' in df_filtered.columns:
-        noted = df_filtered[df_filtered['all_notes'].str.len() > 0]
-        if len(noted) > 0:
-            for _, row in noted.head(5).iterrows():
-                guest = row.get('guest_name', 'Guest')
-                venue = row.get('venue_name', '')
-                time = row.get('time', '')
-                note = str(row['all_notes'])[:80] + ('...' if len(str(row['all_notes'])) > 80 else '')
-                st.warning(f"**{guest}** ({venue} @ {time}): {note}")
-            if len(noted) > 5:
-                st.caption(f"...and {len(noted) - 5} more")
+    with alert_col2:
+        st.markdown("**Bookings with Notes**")
+        if 'all_notes' in df_filtered.columns:
+            noted = df_filtered[df_filtered['all_notes'].str.len() > 0]
+            if len(noted) > 0:
+                for _, row in noted.head(5).iterrows():
+                    guest = row.get('guest_name', 'Guest')
+                    venue = row.get('venue_name', '')
+                    time = row.get('time', '')
+                    note = str(row['all_notes'])[:80] + ('...' if len(str(row['all_notes'])) > 80 else '')
+                    st.warning(f"**{guest}** ({venue} @ {time}): {note}")
+                if len(noted) > 5:
+                    st.caption(f"...and {len(noted) - 5} more")
+            else:
+                st.success("No special notes to review")
         else:
-            st.success("No special notes to review")
-    else:
-        st.info("No notes data")
+            st.info("No notes data")
 
-# === RESERVATIONS TABLE ===
-st.subheader("All Reservations")
+# === DISPLAY SECTIONS ===
+if selected_venue == "All Pubs":
+    # All Pubs view: Bookings by Pub -> Alerts -> Reservations
+    if 'venue_name' in df_filtered.columns and len(df_filtered) > 0:
+        st.subheader("Bookings by Pub")
+        pub_stats = df_filtered.groupby('venue_name').agg(
+            Reservations=('venue_name', 'count'),
+            Covers=('party_size', 'sum')
+        ).reset_index()
+        pub_stats.columns = ['Pub', 'Reservations', 'Covers']
+        pub_stats['Covers'] = pub_stats['Covers'].astype(int)
+        pub_stats = pub_stats.sort_values('Covers', ascending=False)
+        st.dataframe(pub_stats, use_container_width=True, hide_index=True)
 
-display_cols = ['venue_name', 'time', 'guest_name', 'party_size', 'table', 'all_notes', 'phone']
-display_cols = [c for c in display_cols if c in df_filtered.columns]
-
-if len(df_filtered) > 0 and display_cols:
-    df_display = df_filtered[display_cols].copy()
-    df_display.columns = ['Pub', 'Time', 'Guest', 'Covers', 'Table', 'Notes', 'Phone'][:len(display_cols)]
-    df_display = df_display.sort_values('Time' if 'Time' in df_display.columns else df_display.columns[0])
-    st.dataframe(df_display, use_container_width=True, hide_index=True)
-
-    csv = df_display.to_csv(index=False)
-    st.download_button("Download CSV", csv, f"reservations_{selected_date}.csv", "text/csv")
+    show_alerts()
+    show_reservations_table()
 else:
-    st.info("No reservations for the selected filters.")
+    # Individual pub view: Reservations -> Alerts
+    show_reservations_table()
+    show_alerts()
 
 # Footer
 st.sidebar.markdown("---")
