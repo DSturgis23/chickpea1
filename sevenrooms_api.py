@@ -30,7 +30,8 @@ class SevenRoomsClient:
             response.raise_for_status()
 
             data = response.json()
-            self.token = data.get("token") or data.get("access_token")
+            # Token may be nested in data.token or at top level
+            self.token = data.get("data", {}).get("token") or data.get("token") or data.get("access_token")
 
             # Assume token valid for 1 hour if not specified
             expires_in = data.get("expires_in", 3600)
@@ -53,7 +54,7 @@ class SevenRoomsClient:
     def _get_headers(self):
         """Get headers with authentication"""
         return {
-            "Authorization": f"Bearer {self.token}",
+            "Authorization": self.token,
             "Content-Type": "application/json"
         }
 
