@@ -200,6 +200,94 @@ class SevenRoomsClient:
             return None
 
 
+    def get_feedback(self, from_date=None, to_date=None, venue_id=None):
+        """
+        Fetch guest feedback/reviews from SevenRooms
+        Tries multiple possible endpoint paths
+
+        Args:
+            from_date: datetime or string (YYYY-MM-DD)
+            to_date: datetime or string (YYYY-MM-DD)
+            venue_id: Optional venue ID to filter by
+        """
+        if not self._ensure_authenticated():
+            return None
+
+        # Default to last 90 days
+        if from_date is None:
+            from_date = datetime.now() - timedelta(days=90)
+        if to_date is None:
+            to_date = datetime.now()
+
+        if isinstance(from_date, datetime):
+            from_date = from_date.strftime("%Y-%m-%d")
+        if isinstance(to_date, datetime):
+            to_date = to_date.strftime("%Y-%m-%d")
+
+        # Try different possible endpoint paths
+        endpoints = [
+            "/reservation_feedback",
+            "/reservations/feedback",
+            "/feedback",
+            "/reviews"
+        ]
+
+        all_feedback = []
+
+        for endpoint in endpoints:
+            url = f"{self.base_url}{endpoint}"
+            params = {"from_date": from_date, "to_date": to_date, "limit": 400}
+
+            if venue_id:
+                params["venue_id"] = venue_id
+
+            cursor = None
+
+            while True:
+                if cursor:
+                    params["cursor"] = cursor
+
+                try:
+                    response = requests.get(url, headers=self._get_headers(), params=params, timeout=60)
+
+                    if response.status_code == 404:
+                        print(f"Endpoint {endpoint} not found, trying next...")
+                        break
+
+                    response.raise_for_status()
+                    data = response.json()
+
+                    # Try different response structures
+                    results = (
+                        data.get("data", {}).get("results", []) or
+                        data.get("results", []) or
+                        data.get("data", []) or
+                        (data if isinstance(data, list) else [])
+                    )
+
+                    if results:
+                        all_feedback.extend(results)
+                        print(f"Found {len(results)} feedback records from {endpoint}")
+
+                    cursor = (
+                        data.get("data", {}).get("cursor") or
+                        data.get("cursor") or
+                        data.get("next_cursor")
+                    )
+                    if not cursor:
+                        break
+
+                except requests.exceptions.RequestException as e:
+                    print(f"Failed to fetch from {endpoint}: {e}")
+                    break
+
+            # If we found data, stop trying other endpoints
+            if all_feedback:
+                break
+
+        return {"status": 200, "data": {"results": all_feedback}, "endpoint_used": endpoint if all_feedback else None}
+
+
 # Test connection
 if __name__ == "__main__":
     client = SevenRoomsClient()
