@@ -581,10 +581,16 @@ with tab_analytics:
             hist_res_resp = client.get_reservations(from_date=analytics_from, to_date=analytics_to)
             analytics_reservations = hist_res_resp.get("data", {}).get("results", []) if hist_res_resp else []
 
-            # Fetch feedback for date range
-            feedback_resp = client.get_feedback(from_date=analytics_from, to_date=analytics_to)
-            analytics_feedback = feedback_resp.get("data", {}).get("results", []) if feedback_resp else []
-            feedback_endpoint = feedback_resp.get("endpoint_used") if feedback_resp else None
+            # Fetch feedback for date range (if method exists)
+            analytics_feedback = []
+            feedback_endpoint = None
+            if hasattr(client, 'get_feedback'):
+                try:
+                    feedback_resp = client.get_feedback(from_date=analytics_from, to_date=analytics_to)
+                    analytics_feedback = feedback_resp.get("data", {}).get("results", []) if feedback_resp else []
+                    feedback_endpoint = feedback_resp.get("endpoint_used") if feedback_resp else None
+                except Exception as e:
+                    st.warning(f"Could not fetch feedback: {e}")
 
             st.session_state['analytics_reservations'] = analytics_reservations
             st.session_state['analytics_feedback'] = analytics_feedback
