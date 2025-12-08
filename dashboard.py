@@ -62,9 +62,10 @@ def get_client():
 
 client = get_client()
 
-# === DATA LOADING FUNCTION ===
+# === DATA LOADING FUNCTIONS ===
+
 def load_data():
-    """Load venues and reservations from SevenRooms"""
+    """Load venues and reservations from SevenRooms (fresh, no cache for Operations)"""
     if not client.authenticate():
         return None, None, None
 
@@ -84,6 +85,28 @@ def load_data():
     historical = hist_resp.get("data", {}).get("results", []) if hist_resp else []
 
     return venues, reservations, historical
+
+# Cached functions for Analytics (historical data doesn't change)
+@st.cache_data(ttl=600, show_spinner=False)  # Cache for 10 minutes
+def load_analytics_reservations(_client, from_date_str, to_date_str):
+    """Load historical reservations with caching"""
+    if not _client._ensure_authenticated():
+        return []
+    resp = _client.get_reservations(from_date=from_date_str, to_date=to_date_str)
+    return resp.get("data", {}).get("results", []) if resp else []
+
+@st.cache_data(ttl=600, show_spinner=False)  # Cache for 10 minutes
+def load_analytics_feedback(_client, from_date_str, to_date_str):
+    """Load feedback with caching"""
+    if not hasattr(_client, 'get_feedback'):
+        return [], None
+    try:
+        resp = _client.get_feedback(from_date=from_date_str, to_date=to_date_str)
+        results = resp.get("data", {}).get("results", []) if resp else []
+        endpoint = resp.get("endpoint_used") if resp else None
+        return results, endpoint
+    except Exception:
+        return [], None
 
 # Sidebar - global controls only
 st.sidebar.header("Settings")
@@ -576,28 +599,21 @@ with tab_analytics:
 
     # Load analytics data button
     if st.button("Load Analytics Data", type="primary", key="load_analytics"):
-        with st.spinner("Fetching historical data..."):
-            # Fetch reservations for date range
-            hist_res_resp = client.get_reservations(from_date=analytics_from, to_date=analytics_to)
-            analytics_reservations = hist_res_resp.get("data", {}).get("results", []) if hist_res_resp else []
+        with st.spinner("Fetching historical data (cached for 10 mins)..."):
+            # Convert dates to strings for cache key
+            from_str = analytics_from.strftime("%Y-%m-%d")
+            to_str = analytics_to.strftime("%Y-%m-%d")
 
-            # Fetch feedback for date range (if method exists)
-            analytics_feedback = []
-            feedback_endpoint = None
-            if hasattr(client, 'get_feedback'):
-                try:
-                    feedback_resp = client.get_feedback(from_date=analytics_from, to_date=analytics_to)
-                    analytics_feedback = feedback_resp.get("data", {}).get("results", []) if feedback_resp else []
-                    feedback_endpoint = feedback_resp.get("endpoint_used") if feedback_resp else None
-                except Exception as e:
-                    st.warning(f"Could not fetch feedback: {e}")
+            # Fetch using cached functions
+            analytics_reservations = load_analytics_reservations(client, from_str, to_str)
+            analytics_feedback, feedback_endpoint = load_analytics_feedback(client, from_str, to_str)
 
             st.session_state['analytics_reservations'] = analytics_reservations
             st.session_state['analytics_feedback'] = analytics_feedback
             st.session_state['analytics_date_range'] = (analytics_from, analytics_to)
             st.session_state['feedback_endpoint'] = feedback_endpoint
 
-            feedback_msg = f" (from {feedback_endpoint})" if feedback_endpoint else " (no endpoint found)"
+            feedback_msg = f" (from {feedback_endpoint})" if feedback_endpoint else ""
             st.success(f"Loaded {len(analytics_reservations)} reservations and {len(analytics_feedback)} feedback entries{feedback_msg}")
 
     # Display analytics if data loaded
