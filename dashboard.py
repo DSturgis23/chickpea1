@@ -584,12 +584,15 @@ with tab_analytics:
             # Fetch feedback for date range
             feedback_resp = client.get_feedback(from_date=analytics_from, to_date=analytics_to)
             analytics_feedback = feedback_resp.get("data", {}).get("results", []) if feedback_resp else []
+            feedback_endpoint = feedback_resp.get("endpoint_used") if feedback_resp else None
 
             st.session_state['analytics_reservations'] = analytics_reservations
             st.session_state['analytics_feedback'] = analytics_feedback
             st.session_state['analytics_date_range'] = (analytics_from, analytics_to)
+            st.session_state['feedback_endpoint'] = feedback_endpoint
 
-            st.success(f"Loaded {len(analytics_reservations)} reservations and {len(analytics_feedback)} feedback entries")
+            feedback_msg = f" (from {feedback_endpoint})" if feedback_endpoint else " (no endpoint found)"
+            st.success(f"Loaded {len(analytics_reservations)} reservations and {len(analytics_feedback)} feedback entries{feedback_msg}")
 
     # Display analytics if data loaded
     if 'analytics_reservations' in st.session_state:
