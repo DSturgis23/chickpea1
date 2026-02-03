@@ -49,25 +49,32 @@ if not check_password():
 
 # === MAIN DASHBOARD ===
 from sevenrooms_api import SevenRoomsClient
+from eviivo_api import EviivoClient
+from pub_mapping import get_all_eviivo_properties
 
 st.title("Chickpea Pubs - Reservations Dashboard")
 
 # Create tabs
 tab_operations, tab_analytics = st.tabs(["📅 Operations", "📊 Analytics"])
 
-# Initialize client
+# Initialize clients
 @st.cache_resource
-def get_client():
+def get_sevenrooms_client():
     return SevenRoomsClient()
 
-client = get_client()
+@st.cache_resource
+def get_eviivo_client():
+    return EviivoClient()
+
+client = get_sevenrooms_client()
+eviivo_client = get_eviivo_client()
 
 # === DATA LOADING FUNCTIONS ===
 
 def load_data():
     """Load venues and reservations from SevenRooms (fresh, no cache for Operations)"""
     if not client.authenticate():
-        return None, None, None
+        return None, None, None, None, []
 
     venues_resp = client.get_venues()
     venues = venues_resp.get("data", {}).get("results", []) if venues_resp else []
@@ -84,7 +91,31 @@ def load_data():
     hist_resp = client.get_reservations(from_date=hist_from, to_date=hist_to)
     historical = hist_resp.get("data", {}).get("results", []) if hist_resp else []
 
-    return venues, reservations, historical
+    # Fetch eviivo room bookings for today
+    eviivo_bookings = []
+    eviivo_error = None
+    try:
+        if eviivo_client.authenticate():
+            property_mappings = get_all_eviivo_properties()
+            eviivo_bookings = eviivo_client.get_all_bookings(property_mappings, date.today())
+        else:
+            eviivo_error = "eviivo auth failed"
+    except Exception as e:
+        eviivo_error = str(e)
+        print(f"eviivo error: {e}")
+
+    # Fetch historical feedback for guest matching (last 180 days)
+    feedback_for_alerts = []
+    try:
+        feedback_resp = client.get_feedback(
+            from_date=datetime.now() - timedelta(days=180),
+            to_date=datetime.now()
+        )
+        feedback_for_alerts = feedback_resp.get("data", {}).get("results", []) if feedback_resp else []
+    except Exception as e:
+        print(f"Feedback fetch error: {e}")
+
+    return venues, reservations, historical, eviivo_bookings, feedback_for_alerts
 
 # Cached functions for Analytics (historical data doesn't change)
 @st.cache_data(ttl=600, show_spinner=False)  # Cache for 10 minutes
@@ -108,18 +139,122 @@ def load_analytics_feedback(_client, from_date_str, to_date_str):
     except Exception:
         return [], None
 
+
+# === LOW-RATING GUEST ALERT HELPERS ===
+
+def normalize_phone(phone):
+    """Normalize phone number for matching."""
+    if not phone:
+        return ''
+    return ''.join(c for c in str(phone) if c.isdigit())[-10:]  # Last 10 digits
+
+
+def normalize_name(first, last):
+    """Normalize name for matching."""
+    full = f"{first or ''} {last or ''}".lower().strip()
+    return ' '.join(full.split())  # Collapse whitespace
+
+
+def build_low_rating_lookup(feedback_list):
+    """
+    Build a lookup of guests who left ratings < 3 stars.
+    Returns dict keyed by (type, value) with feedback details.
+    """
+    low_ratings = {}
+
+    if not feedback_list:
+        return low_ratings
+
+    # Find rating column - SevenRooms uses 'overall'
+    rating_col = None
+    for col in ['overall', 'overall_rating', 'overallRating', 'rating', 'stars', 'score']:
+        if feedback_list and col in feedback_list[0]:
+            rating_col = col
+            break
+
+    if not rating_col:
+        return low_ratings
+
+    for fb in feedback_list:
+        try:
+            raw_rating = fb.get(rating_col, 5)
+            if raw_rating is None or str(raw_rating).strip() == '':
+                continue
+            rating = float(raw_rating)
+            if rating < 3:
+                # Extract identifiers (enriched by _enrich_feedback_with_guest_data)
+                email = str(fb.get('email', fb.get('guest_email', ''))).lower().strip()
+                phone = normalize_phone(fb.get('phone_number', fb.get('phone', fb.get('telephone', ''))))
+                first_name = fb.get('first_name', fb.get('firstName', ''))
+                last_name = fb.get('last_name', fb.get('lastName', fb.get('surname', '')))
+                name = normalize_name(first_name, last_name)
+
+                # Find comment - SevenRooms uses 'notes'
+                comment = ''
+                for c in ['notes', 'comment', 'comments', 'feedback', 'text', 'review', 'additional_notes']:
+                    if fb.get(c):
+                        comment = str(fb[c])
+                        break
+
+                # Find venue
+                venue_id = fb.get('venue_id', fb.get('venueId', ''))
+
+                # Store by each identifier that exists
+                entry = {
+                    'rating': rating,
+                    'comment': comment,
+                    'venue_id': venue_id,
+                    'date': fb.get('reservation_date', fb.get('date', fb.get('created', '')))
+                }
+
+                if email:
+                    low_ratings[('email', email)] = entry
+                if phone:
+                    low_ratings[('phone', phone)] = entry
+                if name:
+                    low_ratings[('name', name)] = entry
+        except (ValueError, TypeError):
+            continue
+
+    return low_ratings
+
+
+def find_low_rating_match(reservation, low_rating_lookup, venue_map):
+    """Check if a reservation guest has left a low rating."""
+    email = str(reservation.get('email', '')).lower().strip()
+    phone = normalize_phone(reservation.get('phone_number', reservation.get('phone', '')))
+    name = normalize_name(reservation.get('first_name', ''), reservation.get('last_name', ''))
+
+    # Check each identifier
+    for key in [('email', email), ('phone', phone), ('name', name)]:
+        if key[1] and key in low_rating_lookup:
+            match = low_rating_lookup[key]
+            venue_name = venue_map.get(match.get('venue_id', ''), 'Unknown')
+            return {
+                'rating': match['rating'],
+                'comment': match['comment'],
+                'venue': venue_name,
+                'date': match['date']
+            }
+    return None
+
+
 # Sidebar - global controls only
 st.sidebar.header("Settings")
 
 # Load/Refresh button
 if st.sidebar.button("Refresh Data", type="primary") or 'venues' not in st.session_state:
-    with st.spinner("Loading from SevenRooms..."):
-        venues, reservations, historical = load_data()
+    with st.spinner("Loading from SevenRooms and eviivo..."):
+        venues, reservations, historical, eviivo_bookings, feedback_for_alerts = load_data()
         if venues is not None:
             st.session_state['venues'] = venues
             st.session_state['reservations'] = reservations
             st.session_state['historical'] = historical
-            st.sidebar.success(f"Loaded {len(venues)} pubs, {len(reservations)} future + {len(historical)} historical reservations")
+            st.session_state['eviivo_bookings'] = eviivo_bookings or []
+            # Build low-rating lookup for alerts
+            st.session_state['low_rating_lookup'] = build_low_rating_lookup(feedback_for_alerts)
+            eviivo_msg = f", {len(eviivo_bookings)} room stays" if eviivo_bookings else ""
+            st.sidebar.success(f"Loaded {len(venues)} pubs, {len(reservations)} future + {len(historical)} historical reservations{eviivo_msg}")
         else:
             st.sidebar.error("Failed to connect - check credentials")
 
@@ -136,6 +271,7 @@ st.sidebar.caption("Chickpea Pub Group")
 venues = st.session_state.get('venues', [])
 reservations = st.session_state.get('reservations', [])
 historical = st.session_state.get('historical', [])
+eviivo_bookings = st.session_state.get('eviivo_bookings', [])
 
 if not reservations:
     st.info("Click **Refresh Data** in the sidebar to fetch reservations from SevenRooms.")
@@ -248,7 +384,7 @@ def format_diff(current, last_week):
 # === OPERATIONS TAB ===
 with tab_operations:
     # Filters at top of Operations tab
-    filter_col1, filter_col2, filter_col3, filter_col4 = st.columns([2, 2, 2, 1])
+    filter_col1, filter_col2, filter_col3, filter_col4, filter_col5 = st.columns([2, 2, 2, 2, 1])
 
     # Venue filter - exclude group-level entries
     venue_names = ["All Pubs"] + sorted([v['name'] for v in venues if 'chickpea' not in v['name'].lower()])
@@ -279,12 +415,30 @@ with tab_operations:
             st.warning("No future reservations found")
 
     with filter_col3:
-        hide_cancelled = st.checkbox("Hide cancelled", value=True, key="ops_hide_cancelled")
+        source_options = ["All", "Reservations", "Room Stays"]
+        selected_source = st.radio("Show", source_options, horizontal=True, key="ops_source")
 
     with filter_col4:
-        st.caption(f"{len(df)} total loaded")
+        hide_cancelled = st.checkbox("Hide cancelled", value=True, key="ops_hide_cancelled")
+
+    with filter_col5:
+        st.caption(f"{len(df)} res + {len(eviivo_bookings)} rooms")
 
     st.markdown("---")
+
+    # === FETCH EVIIVO BOOKINGS FOR SELECTED DATE ===
+    # Fetch eviivo bookings for the selected date (if different from today)
+    eviivo_for_date = []
+    if selected_date == today:
+        eviivo_for_date = eviivo_bookings
+    else:
+        # Fetch eviivo bookings for the selected date
+        try:
+            if eviivo_client._ensure_authenticated():
+                property_mappings = get_all_eviivo_properties()
+                eviivo_for_date = eviivo_client.get_all_bookings(property_mappings, selected_date)
+        except Exception as e:
+            print(f"eviivo fetch error for {selected_date}: {e}")
 
     # === APPLY FILTERS ===
     df_filtered = df.copy()
@@ -305,6 +459,28 @@ with tab_operations:
     if 'reservation_date' in df_filtered.columns:
         df_filtered = df_filtered[df_filtered['reservation_date'] == selected_date]
 
+    # Add source/type columns for SevenRooms reservations
+    df_filtered['source'] = 'sevenrooms'
+    df_filtered['type'] = 'reservation'
+    df_filtered['detail'] = df_filtered.get('table', '-')
+
+    # === CREATE EVIIVO DATAFRAME ===
+    df_eviivo = pd.DataFrame()
+    if eviivo_for_date:
+        df_eviivo = pd.DataFrame(eviivo_for_date)
+        # Filter by venue if selected
+        if selected_venue != "All Pubs" and 'venue_name' in df_eviivo.columns:
+            df_eviivo = df_eviivo[df_eviivo['venue_name'] == selected_venue]
+        # Filter by status if hide_cancelled
+        if hide_cancelled and 'status' in df_eviivo.columns:
+            df_eviivo = df_eviivo[~df_eviivo['status'].str.lower().isin(['cancelled', 'canceled'])]
+
+    # Apply source filter
+    if selected_source == "Reservations":
+        df_eviivo = pd.DataFrame()  # Clear eviivo data
+    elif selected_source == "Room Stays":
+        df_filtered = pd.DataFrame()  # Clear SevenRooms data
+
     # Calculate same day last week for comparison
     last_week_date = selected_date - timedelta(days=7)
 
@@ -322,12 +498,29 @@ with tab_operations:
     total_res = len(df_filtered)
     total_covers = int(df_filtered['party_size'].sum()) if 'party_size' in df_filtered.columns else 0
 
+    # Eviivo stats
+    total_rooms = len(df_eviivo)
+    total_room_guests = int(df_eviivo['party_size'].sum()) if len(df_eviivo) > 0 and 'party_size' in df_eviivo.columns else 0
+
     # Last week totals
     lw_total_res = len(df_last_week) if len(df_last_week) > 0 else 0
     lw_total_covers = int(df_last_week['party_size'].sum()) if len(df_last_week) > 0 and 'party_size' in df_last_week.columns else 0
     st.subheader(f"Overview - {selected_date.strftime('%A %d/%m/%Y')}")
     if selected_venue != "All Pubs":
         st.caption(f"Showing: {selected_venue}")
+
+    # Dual summary cards for restaurant and accommodation
+    if selected_source == "All":
+        summary_col1, summary_col2 = st.columns(2)
+        with summary_col1:
+            st.markdown("**RESTAURANT**")
+            st.metric("Reservations", total_res)
+            st.metric("Covers", total_covers)
+        with summary_col2:
+            st.markdown("**ACCOMMODATION**")
+            st.metric("Room Stays", total_rooms)
+            st.metric("Guests", total_room_guests)
+        st.markdown("---")
 
     if 'meal_period' in df_filtered.columns:
         meal_stats = []
@@ -389,25 +582,63 @@ with tab_operations:
 
     # === HELPER FUNCTIONS FOR DISPLAY SECTIONS ===
     def show_reservations_table():
-        st.subheader("All Reservations")
-        display_cols = ['venue_name', 'time', 'guest_name', 'party_size', 'seating_area', 'table', 'all_notes', 'phone']
-        display_cols = [c for c in display_cols if c in df_filtered.columns]
-        col_names = ['Pub', 'Time', 'Guest', 'Covers', 'Area', 'Table', 'Notes', 'Phone']
+        st.subheader("Combined Activity" if selected_source == "All" else ("Reservations" if selected_source == "Reservations" else "Room Stays"))
 
-        if len(df_filtered) > 0 and display_cols:
-            df_display = df_filtered[display_cols].copy()
-            df_display.columns = col_names[:len(display_cols)]
-            df_display = df_display.sort_values('Time' if 'Time' in df_display.columns else df_display.columns[0])
-            st.dataframe(df_display, use_container_width=True, hide_index=True)
+        # Build combined dataframe
+        combined_rows = []
 
-            csv = df_display.to_csv(index=False)
-            st.download_button("Download CSV", csv, f"reservations_{selected_date}.csv", "text/csv")
+        # Add SevenRooms reservations
+        if len(df_filtered) > 0:
+            for _, row in df_filtered.iterrows():
+                combined_rows.append({
+                    'Type': 'R',
+                    'Pub': row.get('venue_name', '-'),
+                    'Time': row.get('time', '-'),
+                    'Guest': row.get('guest_name', '-'),
+                    'Size': row.get('party_size', 0),
+                    'Detail': row.get('table', '-'),
+                    'Notes': row.get('all_notes', ''),
+                    'Phone': row.get('phone', '-'),
+                    'source': 'sevenrooms'
+                })
+
+        # Add eviivo room stays
+        if len(df_eviivo) > 0:
+            for _, row in df_eviivo.iterrows():
+                combined_rows.append({
+                    'Type': 'A',
+                    'Pub': row.get('venue_name', '-'),
+                    'Time': row.get('time', '14:00'),
+                    'Guest': row.get('guest_name', '-'),
+                    'Size': row.get('party_size', 0),
+                    'Detail': row.get('detail', 'Room'),
+                    'Notes': row.get('notes', ''),
+                    'Phone': row.get('phone', '-'),
+                    'source': 'eviivo'
+                })
+
+        if combined_rows:
+            df_combined = pd.DataFrame(combined_rows)
+            # Sort by time
+            df_combined = df_combined.sort_values('Time')
+
+            # Display columns (hide source column from display)
+            display_cols = ['Type', 'Pub', 'Time', 'Guest', 'Size', 'Detail', 'Notes', 'Phone']
+            st.dataframe(df_combined[display_cols], use_container_width=True, hide_index=True)
+
+            csv = df_combined[display_cols].to_csv(index=False)
+            filename = f"activity_{selected_date}.csv" if selected_source == "All" else f"{'reservations' if selected_source == 'Reservations' else 'rooms'}_{selected_date}.csv"
+            st.download_button("Download CSV", csv, filename, "text/csv")
+
+            # Legend
+            if selected_source == "All":
+                st.caption("Type: R = Reservation, A = Accommodation")
         else:
-            st.info("No reservations for the selected filters.")
+            st.info("No bookings for the selected filters.")
 
     def show_alerts():
         st.subheader("Alerts")
-        alert_col1, alert_col2, alert_col3 = st.columns(3)
+        alert_col1, alert_col2, alert_col3, alert_col4 = st.columns(4)
 
         with alert_col1:
             st.markdown("**Potential Clashes**")
@@ -503,26 +734,79 @@ with tab_operations:
             else:
                 st.info("No occasion data")
 
+        with alert_col4:
+            st.markdown("**:red[Guests to Look Out For]**")
+
+            low_rating_lookup = st.session_state.get('low_rating_lookup', {})
+
+            if low_rating_lookup and len(df_filtered) > 0:
+                flagged_guests = []
+                for _, row in df_filtered.iterrows():
+                    match = find_low_rating_match(row, low_rating_lookup, venue_map)
+                    if match:
+                        flagged_guests.append({
+                            'guest': row.get('guest_name', 'Guest'),
+                            'venue': row.get('venue_name', ''),
+                            'time': row.get('time', ''),
+                            'rating': match['rating'],
+                            'comment': match['comment'],
+                            'prev_venue': match['venue'],
+                            'prev_date': match['date']
+                        })
+
+                if flagged_guests:
+                    for fg in flagged_guests[:5]:
+                        comment_preview = fg['comment'][:60] + '...' if len(fg['comment']) > 60 else fg['comment']
+                        st.error(f"**{fg['guest']}** ({fg['venue']} @ {fg['time']})\n"
+                                 f"Rated {fg['rating']}/5: \"{comment_preview}\"")
+                    if len(flagged_guests) > 5:
+                        st.caption(f"...and {len(flagged_guests) - 5} more")
+                else:
+                    st.success("No flagged guests today")
+            else:
+                st.info("No feedback data loaded")
+
     # === DISPLAY SECTIONS ===
     if selected_venue == "All Pubs":
         # All Pubs view: Bookings by Pub -> Alerts -> Reservations
-        if 'venue_name' in df_filtered.columns and len(df_filtered) > 0:
+        has_reservations = 'venue_name' in df_filtered.columns and len(df_filtered) > 0
+        has_rooms = len(df_eviivo) > 0 and 'venue_name' in df_eviivo.columns
+
+        if has_reservations or has_rooms:
             st.subheader("Bookings by Pub")
 
             # Build comprehensive stats by pub with meal period breakdown
             pub_list = []
-            # Get all venues from both current and last week
-            all_venues = set(df_filtered['venue_name'].unique())
+            # Get all venues from reservations, rooms, and last week
+            all_venues = set()
+            if has_reservations:
+                all_venues.update(df_filtered['venue_name'].unique())
+            if has_rooms:
+                all_venues.update(df_eviivo['venue_name'].unique())
             if len(df_last_week) > 0 and 'venue_name' in df_last_week.columns:
                 all_venues.update(df_last_week['venue_name'].unique())
 
             for venue in all_venues:
-                venue_df = df_filtered[df_filtered['venue_name'] == venue]
                 row = {'Pub': venue}
 
-                # Current totals
-                current_res = len(venue_df)
-                current_covers = int(venue_df['party_size'].sum()) if 'party_size' in venue_df.columns else 0
+                # Current reservation totals
+                if has_reservations:
+                    venue_df = df_filtered[df_filtered['venue_name'] == venue]
+                    current_res = len(venue_df)
+                    current_covers = int(venue_df['party_size'].sum()) if 'party_size' in venue_df.columns else 0
+                else:
+                    venue_df = pd.DataFrame()
+                    current_res = 0
+                    current_covers = 0
+
+                # Room stay totals for this venue
+                if has_rooms:
+                    venue_rooms = df_eviivo[df_eviivo['venue_name'] == venue]
+                    room_count = len(venue_rooms)
+                    room_guests = int(venue_rooms['party_size'].sum()) if 'party_size' in venue_rooms.columns else 0
+                else:
+                    room_count = 0
+                    room_guests = 0
 
                 # Last week totals for this venue
                 if len(df_last_week) > 0 and 'venue_name' in df_last_week.columns:
@@ -534,13 +818,15 @@ with tab_operations:
                     lw_covers = '-'
 
                 # Format with difference
-                row['Total Res'] = format_diff(current_res, lw_res)
-                row['Total Covers'] = format_diff(current_covers, lw_covers)
+                row['Res'] = format_diff(current_res, lw_res)
+                row['Covers'] = format_diff(current_covers, lw_covers)
+                row['Rooms'] = room_count
+                row['Room Guests'] = room_guests
                 row['LW Res'] = lw_res
                 row['LW Covers'] = lw_covers
 
-                # By meal period
-                if 'meal_period' in venue_df.columns:
+                # By meal period (only for reservations)
+                if has_reservations and 'meal_period' in venue_df.columns:
                     for period in ['Breakfast', 'Lunch', 'Dinner']:
                         period_df = venue_df[venue_df['meal_period'] == period]
                         row[f'{period} Res'] = len(period_df)
@@ -549,11 +835,14 @@ with tab_operations:
                 pub_list.append(row)
 
             pub_stats = pd.DataFrame(pub_list)
-            pub_stats = pub_stats.sort_values('Total Covers', ascending=False)
+            # Sort by total covers (need to extract number from formatted string)
+            pub_stats['_sort_covers'] = pub_stats['Covers'].apply(lambda x: int(str(x).split()[0]) if str(x).split()[0].isdigit() else 0)
+            pub_stats = pub_stats.sort_values('_sort_covers', ascending=False)
+            pub_stats = pub_stats.drop('_sort_covers', axis=1)
 
-            # Reorder columns - include last week columns after totals
-            col_order = ['Pub', 'Total Res', 'Total Covers', 'LW Res', 'LW Covers']
-            if 'meal_period' in df_filtered.columns:
+            # Reorder columns - include room columns
+            col_order = ['Pub', 'Res', 'Covers', 'Rooms', 'Room Guests', 'LW Res', 'LW Covers']
+            if has_reservations and 'meal_period' in df_filtered.columns:
                 col_order += ['Breakfast Res', 'Breakfast Covers', 'Lunch Res', 'Lunch Covers', 'Dinner Res', 'Dinner Covers']
             pub_stats = pub_stats[[c for c in col_order if c in pub_stats.columns]]
 

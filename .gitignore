@@ -7,6 +7,12 @@ __pycache__/
 *.py[cod]
 .env
 
+# Virtual environment
+venv/
+
+# Nested repo copy
+chickpea/
+
 # OS
 .DS_Store
 ~$*
