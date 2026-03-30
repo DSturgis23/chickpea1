@@ -54,7 +54,7 @@ class EviivoClient:
             "grant_type": "client_credentials",
             "client_id": self.client_id,
             "client_secret": self.client_secret,
-            "scope": "pmsapi"
+            "scope": ""
         }
 
         headers = {
@@ -90,6 +90,7 @@ class EviivoClient:
         """Get headers with OAuth bearer token"""
         return {
             "Authorization": f"Bearer {self.token}",
+            "X-Auth-ClientId": self.client_id,
             "Content-Type": "application/json"
         }
 
@@ -112,9 +113,9 @@ class EviivoClient:
         elif hasattr(stay_date, 'strftime'):
             stay_date = stay_date.strftime("%Y-%m-%d")
 
-        url = f"{self.api_url}/properties/{property_short_name}/bookings"
+        url = f"{self.api_url}/property/{property_short_name}/bookings"
         params = {
-            "stayDate": stay_date
+            "request.stayDate": stay_date
         }
 
         try:
@@ -122,10 +123,9 @@ class EviivoClient:
             response.raise_for_status()
             data = response.json()
 
-            # eviivo returns bookings in a list
-            bookings = data if isinstance(data, list) else data.get("bookings", data.get("data", []))
+            # eviivo returns {"Bookings": [...]}
+            bookings = data.get("Bookings", data if isinstance(data, list) else [])
 
-            # Normalize each booking
             normalized = []
             for booking in bookings:
                 normalized.append(self._normalize_booking(booking, property_short_name))
@@ -135,6 +135,55 @@ class EviivoClient:
         except requests.exceptions.RequestException as e:
             print(f"Failed to fetch bookings for {property_short_name}: {e}")
             return []
+
+    def get_bookings_range(self, property_short_name, checkin_from, checkin_to):
+        """Fetch all bookings for a property within a check-in date range.
+        Automatically chunks into 31-day batches (API maximum)."""
+        if not self._ensure_authenticated():
+            return []
+
+        # Normalise to datetime objects
+        if isinstance(checkin_from, str):
+            checkin_from = datetime.strptime(checkin_from, "%Y-%m-%d")
+        elif not isinstance(checkin_from, datetime):
+            checkin_from = datetime(checkin_from.year, checkin_from.month, checkin_from.day)
+
+        if isinstance(checkin_to, str):
+            checkin_to = datetime.strptime(checkin_to, "%Y-%m-%d")
+        elif not isinstance(checkin_to, datetime):
+            checkin_to = datetime(checkin_to.year, checkin_to.month, checkin_to.day)
+
+        url = f"{self.api_url}/property/{property_short_name}/bookings"
+        all_bookings = []
+        chunk_start = checkin_from
+
+        while chunk_start <= checkin_to:
+            chunk_end = min(chunk_start + timedelta(days=30), checkin_to)
+            params = {
+                "request.CheckInFrom": chunk_start.strftime("%Y-%m-%d"),
+                "request.CheckInTo": chunk_end.strftime("%Y-%m-%d"),
+            }
+            try:
+                response = requests.get(url, headers=self._get_headers(), params=params, timeout=60)
+                response.raise_for_status()
+                bookings = response.json().get("Bookings", [])
+                all_bookings.extend([self._normalize_booking(b, property_short_name) for b in bookings])
+            except requests.exceptions.RequestException as e:
+                print(f"Failed to fetch {property_short_name} ({chunk_start.date()} – {chunk_end.date()}): {e}")
+            chunk_start = chunk_end + timedelta(days=1)
+
+        return all_bookings
+
+    def get_all_historical_bookings(self, property_mappings, checkin_from, checkin_to):
+        """Fetch historical bookings across all properties within a check-in date range."""
+        all_bookings = []
+        for venue_name, property_short_name in property_mappings.items():
+            if property_short_name:
+                bookings = self.get_bookings_range(property_short_name, checkin_from, checkin_to)
+                for booking in bookings:
+                    booking['venue_name'] = venue_name.strip()
+                all_bookings.extend(bookings)
+        return all_bookings
 
     def get_all_bookings(self, property_mappings, stay_date):
         """
@@ -154,107 +203,92 @@ class EviivoClient:
                 bookings = self.get_bookings(property_short_name, stay_date)
                 # Add venue name to each booking for display
                 for booking in bookings:
-                    booking['venue_name'] = venue_name
+                    booking['venue_name'] = venue_name.strip()
                 all_bookings.extend(bookings)
 
         return all_bookings
 
-    def _normalize_booking(self, booking, property_short_name):
-        """
-        Convert eviivo booking format to unified schema
+    def _normalize_booking(self, record, property_short_name):
+        """Convert eviivo booking record to unified schema."""
+        b = record.get("Booking", {})
+        guests = record.get("Guests", [])
 
-        Args:
-            booking: Raw booking data from eviivo API
-            property_short_name: The property this booking belongs to
-
-        Returns:
-            Dict with normalized fields matching the unified data model
-        """
-        # Extract guest info - eviivo uses FirstName/Surname
-        first_name = booking.get("FirstName", booking.get("firstName", ""))
-        surname = booking.get("Surname", booking.get("surname", booking.get("lastName", "")))
+        # Primary guest
+        primary = next((g for g in guests if g.get("PrimaryGuest")), guests[0] if guests else {})
+        first_name = primary.get("FirstName", "")
+        surname = primary.get("Surname", "")
         guest_name = f"{first_name} {surname}".strip() or "Guest"
 
-        # Guest count - try various field names
-        guest_count = (
-            booking.get("NumberOfGuests") or
-            booking.get("numberOfGuests") or
-            booking.get("Adults", 0) + booking.get("Children", 0) or
-            booking.get("adults", 0) + booking.get("children", 0) or
-            1
-        )
+        # Party size
+        adults = b.get("NumberOfAdults", 0) or 0
+        children = b.get("NumberOfChildren", 0) or 0
+        guest_count = max(adults + children, 1)
 
-        # Phone number
-        phone = (
-            booking.get("Telephone") or
-            booking.get("telephone") or
-            booking.get("Phone") or
-            booking.get("phone") or
-            booking.get("Mobile") or
-            booking.get("mobile") or
-            ""
-        )
+        # Room name (room number / type)
+        room = b.get("Room", {})
+        room_name = room.get("LocalisedName", "Room")
 
-        # Room type/name
-        room_type = (
-            booking.get("RoomTypeName") or
-            booking.get("roomTypeName") or
-            booking.get("RoomType") or
-            booking.get("roomType") or
-            booking.get("UnitName") or
-            booking.get("unitName") or
-            "Room"
-        )
+        # Dates
+        checkin_date = b.get("CheckinDate", "")
+        checkout_date = b.get("CheckoutDate", "")
+        arrival_time = b.get("EstimatedArrivalTime") or "14:00"
 
-        # Check-in time - default to 14:00 if not specified
-        checkin_time = booking.get("CheckInTime") or booking.get("checkInTime") or "14:00"
+        # Contact
+        phone = primary.get("Telephone", "")
+        email = primary.get("Email", "")
 
-        # Arrival/stay date
-        arrival_date = (
-            booking.get("ArrivalDate") or
-            booking.get("arrivalDate") or
-            booking.get("CheckIn") or
-            booking.get("checkIn") or
-            ""
-        )
+        # Total value
+        total = b.get("Total", {}).get("GrossAmount", {}).get("Value", 0) or 0
 
-        # Booking reference
-        booking_ref = (
-            booking.get("BookingRef") or
-            booking.get("bookingRef") or
-            booking.get("Reference") or
-            booking.get("reference") or
-            booking.get("Id") or
-            booking.get("id") or
-            ""
+        # Booking channel / source (OTA vs direct)
+        channel = (
+            b.get("BookingSource")
+            or b.get("Source")
+            or b.get("DistributionChannel")
+            or b.get("Channel")
+            or b.get("BookingOrigin")
+            or record.get("BookingSource")
+            or record.get("Source")
+            or ""
         )
+        # Normalise to Direct / OTA / Other
+        channel_lower = str(channel).lower()
+        if not channel or channel_lower in ("", "none", "unknown"):
+            channel_normalised = "Unknown"
+        elif any(x in channel_lower for x in ("direct", "phone", "walk", "email", "reception", "website")):
+            channel_normalised = "Direct"
+        elif any(x in channel_lower for x in ("booking.com", "expedia", "airbnb", "ota", "tripadvisor",
+                                               "laterooms", "hotels.com", "agoda", "hostelworld")):
+            channel_normalised = "OTA"
+        else:
+            channel_normalised = channel.strip() or "Other"
 
-        # Notes/special requests
-        notes = (
-            booking.get("Notes") or
-            booking.get("notes") or
-            booking.get("SpecialRequests") or
-            booking.get("specialRequests") or
-            booking.get("Comments") or
-            booking.get("comments") or
-            ""
-        )
+        # Room type
+        room_type = room.get("RoomType", {})
+        room_type_name = room_type.get("LocalisedName", "") if isinstance(room_type, dict) else ""
 
         return {
             "source": "eviivo",
             "type": "room_stay",
-            "venue_name": "",  # Will be filled in by get_all_bookings
+            "venue_name": "",  # filled in by get_all_bookings
             "guest_name": guest_name,
-            "party_size": int(guest_count),
+            "party_size": guest_count,
             "phone": phone,
-            "detail": room_type,
-            "time": checkin_time,
-            "date": arrival_date,
-            "booking_ref": str(booking_ref),
-            "notes": notes,
-            "status": booking.get("Status") or booking.get("status") or "Confirmed",
+            "email": email,
+            "detail": f"Room {room_name}",
+            "time": arrival_time,
+            "date": checkin_date,
+            "checkout_date": checkout_date,
+            "booking_ref": b.get("BookingReference", ""),
+            "notes": b.get("BookingNote", ""),
+            "status": "Cancelled" if b.get("Cancelled") else "Confirmed",
+            "checkin_status": b.get("CheckinStatus", ""),
+            "total_value": total,
             "property_short_name": property_short_name,
-            "raw_booking": booking  # Keep original for debugging
+            "booking_channel_raw": channel,
+            "booking_channel": channel_normalised,
+            "room_name": room_name,
+            "room_type": room_type_name,
         }
 
 

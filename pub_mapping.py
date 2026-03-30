@@ -9,19 +9,13 @@ once they are provided.
 # Mapping from SevenRooms venue name -> eviivo property shortname
 # Set to None or empty string for venues without eviivo accommodation
 EVIIVO_PROPERTY_MAPPINGS = {
-    # Pubs with accommodation (update shortnames when received)
-    "Bell & Crown": "bell-crown",          # Placeholder - update with real shortname
-    "Dog & Gun": "dog-gun",                # Placeholder - update with real shortname
-    "Fleur de Lys": "fleur-de-lys",        # Placeholder - update with real shortname
-    "Grosvenor": "grosvenor",              # Placeholder - update with real shortname
-    "Kings Arms": "kings-arms",            # Placeholder - update with real shortname
-    "The Manor House Inn": "manor-house",   # Placeholder - update with real shortname
-    "Nole": "nole",                        # Placeholder - update with real shortname
-    "Nole Salisbury": "nole-salisbury",    # Placeholder - update with real shortname
-    "Pembroke": "pembroke",                # Placeholder - update with real shortname
-    "Queen's Head": "queens-head",         # Placeholder - update with real shortname
-    "Silver Plough": "silver-plough",      # Placeholder - update with real shortname
-    "Caboose": "caboose",                  # Placeholder - update with real shortname
+    "The Bell & Crown": "TheBellBA121",
+    "The Dog & Gun": "DogandGunSP4",
+    "The Fleur de Lys": "TheFleurdeLysInnBH21",
+    "The Grosvenor Arms": "TheGrosvenorArmsSP3",
+    "The Manor House Inn": "TheManorHouseInnBA4",
+    "The Pembroke Arms": "PembrokeSP2",
+    "The Queen's Head": "TheQueensHeadSP5",
 }
 
 # Reverse mapping for looking up SevenRooms name from eviivo property
