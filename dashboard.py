@@ -55,7 +55,7 @@ from pub_mapping import get_all_eviivo_properties
 st.title("Chickpea Pubs - Reservations Dashboard")
 
 # Create tabs
-tab_operations, tab_analytics, tab_marketing, tab_sales, tab_rooms = st.tabs(["📅 Operations", "📊 Analytics", "📣 Marketing", "🍽️ Sales & Food", "🛏️ Rooms Intelligence"])
+tab_operations, tab_analytics, tab_marketing, tab_sales, tab_rooms, tab_projections = st.tabs(["📅 Operations", "📊 Analytics", "📣 Marketing", "🍽️ Sales & Food", "🛏️ Rooms Intelligence", "🔮 Projections"])
 
 # Initialize clients
 @st.cache_resource
@@ -597,6 +597,58 @@ with tab_operations:
             st.caption(f"{with_notes} booking(s) with notes")
 
     # === HELPER FUNCTIONS FOR DISPLAY SECTIONS ===
+    def show_upcoming_functions():
+        """Show bookings of 16+ covers across the next 7 days."""
+        if 'reservation_date' not in df.columns or 'party_size' not in df.columns:
+            return
+
+        cutoff = selected_date + timedelta(days=7)
+        df_funcs = df[
+            (df['reservation_date'] >= selected_date) &
+            (df['reservation_date'] <= cutoff) &
+            (df['party_size'] >= 16)
+        ].copy()
+
+        if 'status' in df_funcs.columns:
+            df_funcs = df_funcs[~df_funcs['status'].str.lower().isin(['canceled', 'cancelled'])]
+
+        if selected_venue != "All Pubs" and 'venue_name' in df_funcs.columns:
+            df_funcs = df_funcs[df_funcs['venue_name'] == selected_venue]
+
+        if len(df_funcs) == 0:
+            return
+
+        st.subheader("🎉 Upcoming Functions (next 7 days)")
+        st.caption("Bookings of 16 or more covers")
+
+        df_funcs = df_funcs.sort_values(['reservation_date', 'time'] if 'time' in df_funcs.columns else ['reservation_date'])
+
+        for _, row in df_funcs.iterrows():
+            res_date = row.get('reservation_date', '')
+            try:
+                date_str = res_date.strftime('%A %d/%m') if hasattr(res_date, 'strftime') else str(res_date)
+            except Exception:
+                date_str = str(res_date)
+
+            time_str = row.get('time', '')
+            guest = row.get('guest_name', 'Guest')
+            party = row.get('party_size', 0)
+            venue = row.get('venue_name', '')
+            notes = row.get('all_notes', '') or ''
+            occasion = row.get('occasion', '') or ''
+
+            label_parts = [f"**{guest}**", f"party of **{party}**", f"@ {time_str}" if time_str else '']
+            if occasion:
+                label_parts.append(f"— {occasion}")
+            if selected_venue == "All Pubs":
+                label_parts.insert(0, f"**{venue}** ·")
+
+            st.markdown(f"{date_str} — {' '.join(p for p in label_parts if p)}")
+            if notes and len(notes.strip()) > 3:
+                st.warning(f"📝 {notes[:200]}")
+
+        st.markdown("---")
+
     def show_reservations_table():
         st.subheader("Combined Activity" if selected_source == "All" else ("Reservations" if selected_source == "Reservations" else "Room Stays"))
 
@@ -1161,11 +1213,13 @@ with tab_operations:
             st.dataframe(pub_stats, use_container_width=True, hide_index=True)
             st.caption(f"LW = {last_week_date.strftime('%A %d/%m')}")
 
+        show_upcoming_functions()
         show_alerts()
         show_reservations_table()
         show_room_guests()
     else:
         # Individual pub view: Service Briefing -> Reservations -> Alerts
+        show_upcoming_functions()
         show_service_briefing()
         show_reservations_table()
         show_alerts()
@@ -1476,6 +1530,140 @@ with tab_marketing:
     if 'mkt_feedback' in st.session_state:
         mkt_fb = st.session_state['mkt_feedback']
         mkt_res = st.session_state.get('mkt_reservations', [])
+
+        if mkt_res:
+            df_mkt_base = pd.DataFrame(mkt_res)
+            if 'first_name' in df_mkt_base.columns:
+                df_mkt_base['guest_name'] = (df_mkt_base['first_name'].fillna('') + ' ' + df_mkt_base['last_name'].fillna('')).str.strip()
+            if 'venue_id' in df_mkt_base.columns:
+                df_mkt_base['venue_name'] = df_mkt_base['venue_id'].map(venue_map).fillna('Unknown')
+            if 'max_guests' in df_mkt_base.columns:
+                df_mkt_base['party_size'] = pd.to_numeric(df_mkt_base['max_guests'], errors='coerce').fillna(0).astype(int)
+            if 'status_display' in df_mkt_base.columns:
+                df_mkt_base = df_mkt_base[df_mkt_base['status_display'] != 'Canceled']
+            if mkt_venue != "All Pubs" and 'venue_name' in df_mkt_base.columns:
+                df_mkt_base = df_mkt_base[df_mkt_base['venue_name'] == mkt_venue]
+
+            # === NEW vs RETURNING ===
+            st.markdown("---")
+            st.markdown("### 🆕 New vs Returning Guests")
+
+            df_hist_base = pd.DataFrame(historical) if historical else pd.DataFrame()
+            if len(df_hist_base) > 0 and 'email' in df_hist_base.columns and 'email' in df_mkt_base.columns:
+                # Guests who have any record before mkt_from
+                if 'date' in df_hist_base.columns:
+                    df_hist_base['res_date'] = pd.to_datetime(df_hist_base['date'], errors='coerce')
+                    prior = df_hist_base[df_hist_base['res_date'] < pd.Timestamp(mkt_from)]
+                    prior_emails = set(prior['email'].dropna().str.lower().str.strip())
+                    mkt_emails = df_mkt_base['email'].dropna().str.lower().str.strip()
+                    returning = mkt_emails[mkt_emails.isin(prior_emails)]
+                    new_guests = mkt_emails[~mkt_emails.isin(prior_emails)]
+                    total_with_email = len(mkt_emails[mkt_emails != ''])
+
+                    nv1, nv2, nv3 = st.columns(3)
+                    nv1.metric("New Guests", f"{len(new_guests):,}", help="No prior record in SevenRooms")
+                    nv2.metric("Returning Guests", f"{len(returning):,}", help="Visited before the selected period")
+                    if total_with_email > 0:
+                        nv3.metric("Return Rate", f"{len(returning)/total_with_email*100:.0f}%")
+            else:
+                st.info("Email data needed to calculate new vs returning — may not be available in this date range.")
+
+            # === WIN-BACK LIST ===
+            st.markdown("---")
+            st.markdown("### 💌 Win-Back Opportunities")
+            st.caption("Guests who visited 60–180 days ago but haven't been back — prime for re-engagement campaigns.")
+
+            if len(df_hist_base) > 0 and 'guest_name' in df_mkt_base.columns:
+                if 'date' in df_hist_base.columns:
+                    if 'first_name' in df_hist_base.columns:
+                        df_hist_base['guest_name'] = (df_hist_base['first_name'].fillna('') + ' ' + df_hist_base['last_name'].fillna('')).str.strip()
+                    if 'venue_id' in df_hist_base.columns:
+                        df_hist_base['venue_name'] = df_hist_base['venue_id'].map(venue_map).fillna('Unknown')
+
+                    cutoff_near = date.today() - timedelta(days=60)
+                    cutoff_far = date.today() - timedelta(days=180)
+                    lapsed = df_hist_base[
+                        (df_hist_base['res_date'].dt.date <= cutoff_near) &
+                        (df_hist_base['res_date'].dt.date >= cutoff_far)
+                    ]
+
+                    if len(lapsed) > 0 and 'guest_name' in df_hist_base.columns:
+                        # Most recent visit per guest
+                        last_visit = lapsed.groupby('guest_name').agg(
+                            Last_Visit=('res_date', 'max'),
+                            Venue=('venue_name', 'last'),
+                            Visits=('guest_name', 'count'),
+                        ).reset_index()
+
+                        # Exclude anyone who's visited in the recent marketing period
+                        recent_names = set(df_mkt_base['guest_name'].str.lower().str.strip())
+                        last_visit = last_visit[~last_visit['guest_name'].str.lower().str.strip().isin(recent_names)]
+                        last_visit['Days Since Visit'] = (pd.Timestamp(date.today()) - last_visit['Last_Visit']).dt.days
+                        last_visit['Last_Visit'] = last_visit['Last_Visit'].dt.strftime('%d/%m/%Y')
+                        last_visit = last_visit.sort_values('Days Since Visit')
+                        last_visit.columns = ['Guest', 'Last Visit', 'Last Pub', 'Total Visits', 'Days Since Visit']
+
+                        st.caption(f"**{len(last_visit)}** guests lapsed in this window")
+                        st.dataframe(last_visit.head(50), use_container_width=True, hide_index=True)
+                    else:
+                        st.info("No lapsed guests found in the 60–180 day window.")
+            else:
+                st.info("Historical data needed — click Refresh Data in the sidebar.")
+
+            # === CROSS-VENUE GUESTS ===
+            st.markdown("---")
+            st.markdown("### 🏘️ Cross-Venue Guests")
+            st.caption("Guests who visit multiple Chickpea pubs — your most engaged customers.")
+
+            if 'guest_name' in df_mkt_base.columns and 'venue_name' in df_mkt_base.columns:
+                cross = df_mkt_base.groupby('guest_name').agg(
+                    Pubs_Visited=('venue_name', lambda x: len(x.dropna().unique())),
+                    Pub_List=('venue_name', lambda x: ', '.join(sorted(x.dropna().unique()))),
+                    Visits=('guest_name', 'count'),
+                ).reset_index()
+                cross = cross[cross['Pubs_Visited'] >= 2].sort_values('Pubs_Visited', ascending=False)
+                if len(cross) > 0:
+                    cross.columns = ['Guest', 'Pubs Visited', 'Pubs', 'Total Visits']
+                    st.metric("Multi-Pub Guests", len(cross))
+                    st.dataframe(cross.head(30), use_container_width=True, hide_index=True)
+                else:
+                    st.info("No guests found visiting multiple pubs in this period. Try a longer date range.")
+
+            # === BOOKING LEAD TIME ===
+            st.markdown("---")
+            st.markdown("### ⏱️ Booking Lead Time")
+            st.caption("How far in advance guests typically book.")
+
+            created_col = next((c for c in ['created', 'booking_created', 'created_at', 'date_added', 'booked_at'] if c in df_mkt_base.columns), None)
+            visit_date_col = 'date' if 'date' in df_mkt_base.columns else None
+
+            if created_col and visit_date_col:
+                df_mkt_base['created_dt'] = pd.to_datetime(df_mkt_base[created_col], errors='coerce')
+                df_mkt_base['visit_dt'] = pd.to_datetime(df_mkt_base[visit_date_col], errors='coerce')
+                df_mkt_base['lead_days'] = (df_mkt_base['visit_dt'] - df_mkt_base['created_dt']).dt.days
+                df_lt = df_mkt_base[df_mkt_base['lead_days'].between(0, 365)]
+
+                if len(df_lt) > 0:
+                    lt1, lt2, lt3, lt4 = st.columns(4)
+                    lt1.metric("Avg Lead Time", f"{df_lt['lead_days'].mean():.0f} days")
+                    lt2.metric("Median Lead Time", f"{df_lt['lead_days'].median():.0f} days")
+                    same_day = len(df_lt[df_lt['lead_days'] == 0])
+                    lt3.metric("Same-Day Bookings", f"{same_day} ({same_day/len(df_lt)*100:.0f}%)")
+                    over_week = len(df_lt[df_lt['lead_days'] >= 7])
+                    lt4.metric("Booked 7+ Days Ahead", f"{over_week} ({over_week/len(df_lt)*100:.0f}%)")
+
+                    # Buckets
+                    bins = [0, 1, 3, 7, 14, 30, 90, 365]
+                    labels = ['Same day', '1–2 days', '3–6 days', '1–2 weeks', '2–4 weeks', '1–3 months', '3+ months']
+                    df_lt['bucket'] = pd.cut(df_lt['lead_days'], bins=bins, labels=labels, right=False)
+                    bucket_counts = df_lt['bucket'].value_counts().reindex(labels).reset_index()
+                    bucket_counts.columns = ['Lead Time', 'Bookings']
+                    bucket_counts['%'] = (bucket_counts['Bookings'] / bucket_counts['Bookings'].sum() * 100).round(1).astype(str) + '%'
+                    st.dataframe(bucket_counts, use_container_width=True, hide_index=True)
+                else:
+                    st.info("Not enough lead time data in this period.")
+            else:
+                st.info("Booking creation date not available in SevenRooms data for lead time calculation.")
 
         # === FEEDBACK SUMMARY ===
         st.markdown("---")
@@ -2254,3 +2442,193 @@ with tab_rooms:
 
     else:
         st.info("Select a date range and click **Load Rooms Data** to view room intelligence.")
+
+# === PROJECTIONS TAB ===
+with tab_projections:
+    st.subheader("🔮 Projections")
+    st.caption("Forward pipeline for restaurant bookings and room stays")
+
+    # ── TABLES ──────────────────────────────────────────────────────────────
+    st.markdown("### 🍽️ Restaurant — Forward Pipeline")
+
+    ops_reservations = st.session_state.get('reservations', [])
+    if not ops_reservations:
+        st.info("Click **Refresh Data** in the sidebar to load reservation data.")
+    else:
+        df_proj = pd.DataFrame(ops_reservations)
+        if 'max_guests' in df_proj.columns:
+            df_proj['party_size'] = pd.to_numeric(df_proj['max_guests'], errors='coerce').fillna(0).astype(int)
+        if 'venue_id' in df_proj.columns:
+            df_proj['venue_name'] = df_proj['venue_id'].map(venue_map).fillna('Unknown')
+        if 'date' in df_proj.columns:
+            df_proj['res_date'] = pd.to_datetime(df_proj['date'], errors='coerce')
+        if 'status_display' in df_proj.columns:
+            df_proj = df_proj[df_proj['status_display'] != 'Canceled']
+        df_proj = df_proj[df_proj['res_date'] >= pd.Timestamp(date.today())]
+
+        if len(df_proj) > 0:
+            next_7 = df_proj[df_proj['res_date'] <= pd.Timestamp(date.today() + timedelta(days=7))]
+            next_28 = df_proj[df_proj['res_date'] <= pd.Timestamp(date.today() + timedelta(days=28))]
+
+            tp1, tp2, tp3, tp4 = st.columns(4)
+            tp1.metric("Total Bookings in Pipeline", f"{len(df_proj):,}")
+            tp2.metric("Total Covers in Pipeline", f"{int(df_proj['party_size'].sum()):,}")
+            tp3.metric("Next 7 Days — Covers", f"{int(next_7['party_size'].sum()):,}")
+            tp4.metric("Next 28 Days — Covers", f"{int(next_28['party_size'].sum()):,}")
+
+            # Projected revenue if POS data available
+            sf_res = st.session_state.get('sf_reservations', [])
+            if sf_res:
+                tickets_flat = []
+                for r in sf_res:
+                    for t in (r.get('pos_tickets') or []):
+                        if t.get('source') == 'TEVALIS':
+                            tickets_flat.append({'subtotal': t.get('subtotal', 0), 'covers': r.get('max_guests') or 1})
+                if tickets_flat:
+                    df_t = pd.DataFrame(tickets_flat)
+                    avg_sph = df_t['subtotal'].sum() / max(df_t['covers'].sum(), 1)
+                    pr1, pr2 = st.columns(2)
+                    pr1.metric("Avg Spend / Head (from POS)", f"£{avg_sph:.2f}")
+                    pr2.metric("Projected Revenue — Next 28 Days", f"£{avg_sph * int(next_28['party_size'].sum()):,.0f}",
+                               help="Avg spend per head × booked covers for next 28 days")
+
+            # Weekly table breakdown
+            st.markdown("**Weekly outlook — next 8 weeks**")
+            today_monday = date.today() - timedelta(days=date.today().weekday())
+            week_rows = []
+            for i in range(8):
+                ws = pd.Timestamp(today_monday + timedelta(weeks=i))
+                we = ws + timedelta(days=6)
+                wk = df_proj[(df_proj['res_date'] >= ws) & (df_proj['res_date'] <= we)]
+                covers = int(wk['party_size'].sum())
+                week_rows.append({
+                    'Week': f"w/c {ws.strftime('%d/%m')}",
+                    'Bookings': len(wk),
+                    'Covers': covers,
+                    'Status': '⚠️ Quiet' if covers < 20 and i > 0 else ('🔥 Busy' if covers >= 100 else ''),
+                })
+            df_table_weeks = pd.DataFrame(week_rows)
+            st.dataframe(df_table_weeks, use_container_width=True, hide_index=True)
+
+            quiet = df_table_weeks[df_table_weeks['Status'] == '⚠️ Quiet']
+            if len(quiet) > 0:
+                st.warning(f"⚠️ Quiet weeks: {', '.join(quiet['Week'].tolist())} — consider promotions.")
+
+            # By pub — next 28 days
+            if 'venue_name' in df_proj.columns:
+                st.markdown("**By pub — next 28 days**")
+                by_pub = next_28.groupby('venue_name').agg(
+                    Bookings=('party_size', 'count'),
+                    Covers=('party_size', 'sum'),
+                ).reset_index().sort_values('Covers', ascending=False)
+                by_pub.columns = ['Pub', 'Bookings', 'Covers']
+                if sf_res and tickets_flat:
+                    by_pub['Proj. Revenue'] = by_pub['Covers'].apply(lambda c: f"£{avg_sph * c:,.0f}")
+                st.dataframe(by_pub, use_container_width=True, hide_index=True)
+        else:
+            st.info("No upcoming reservations found.")
+
+    st.markdown("---")
+
+    # ── ROOMS ────────────────────────────────────────────────────────────────
+    st.markdown("### 🛏️ Rooms — Forward Pipeline")
+
+    proj_rooms_horizon = st.selectbox(
+        "Look-ahead window",
+        ["Next 30 days", "Next 60 days", "Next 90 days", "Next 6 months"],
+        key="proj_rooms_horizon"
+    )
+    horizon_days = {"Next 30 days": 30, "Next 60 days": 60, "Next 90 days": 90, "Next 6 months": 180}[proj_rooms_horizon]
+
+    if st.button("Load Future Room Bookings", type="primary", key="load_proj_rooms"):
+        with st.spinner("Fetching upcoming room bookings from eviivo..."):
+            try:
+                if eviivo_client._ensure_authenticated():
+                    fwd_stays = eviivo_client.get_all_historical_bookings(
+                        get_all_eviivo_properties(),
+                        checkin_from=date.today(),
+                        checkin_to=date.today() + timedelta(days=horizon_days),
+                    )
+                    st.session_state['proj_rooms_data'] = fwd_stays
+                    st.success(f"Loaded {len(fwd_stays)} upcoming room bookings")
+                else:
+                    st.error("Could not authenticate with eviivo.")
+            except Exception as e:
+                st.error(f"Error: {e}")
+
+    proj_rooms_data = st.session_state.get('proj_rooms_data', [])
+    if not proj_rooms_data:
+        st.info("Click **Load Future Room Bookings** above to fetch upcoming stays.")
+    else:
+        df_rooms_proj = pd.DataFrame(proj_rooms_data)
+        df_rooms_proj['checkin_dt'] = pd.to_datetime(df_rooms_proj['date'], errors='coerce')
+        df_rooms_proj['checkout_dt'] = pd.to_datetime(df_rooms_proj['checkout_date'], errors='coerce')
+        df_rooms_proj['nights'] = (df_rooms_proj['checkout_dt'] - df_rooms_proj['checkin_dt']).dt.days.clip(lower=0)
+        df_rooms_proj['party_size'] = pd.to_numeric(df_rooms_proj['party_size'], errors='coerce').fillna(1).astype(int)
+        df_rooms_proj['total_value'] = pd.to_numeric(df_rooms_proj['total_value'], errors='coerce').fillna(0)
+
+        df_rooms_future = df_rooms_proj[
+            (df_rooms_proj['status'] != 'Cancelled') &
+            (df_rooms_proj['checkin_dt'] >= pd.Timestamp(date.today()))
+        ]
+
+        if len(df_rooms_future) > 0:
+            rp1, rp2, rp3, rp4 = st.columns(4)
+            rp1.metric("Upcoming Room Stays", f"{len(df_rooms_future):,}")
+            rp2.metric("Upcoming Guests", f"{int(df_rooms_future['party_size'].sum()):,}")
+            rp3.metric("Nights in Pipeline", f"{int(df_rooms_future['nights'].sum()):,}")
+            pipeline_rev = df_rooms_future['total_value'].sum()
+            rp4.metric("Revenue in Pipeline", f"£{pipeline_rev:,.0f}" if pipeline_rev > 0 else "N/A",
+                       help="Based on rates configured in eviivo")
+
+            # Weekly room outlook
+            st.markdown("**Weekly outlook — next 8 weeks**")
+            today_monday = date.today() - timedelta(days=date.today().weekday())
+            room_week_rows = []
+            for i in range(8):
+                ws = pd.Timestamp(today_monday + timedelta(weeks=i))
+                we = ws + timedelta(days=6)
+                wk = df_rooms_future[
+                    (df_rooms_future['checkin_dt'] >= ws) & (df_rooms_future['checkin_dt'] <= we)
+                ]
+                stays = len(wk)
+                guests = int(wk['party_size'].sum())
+                rev = wk['total_value'].sum()
+                room_week_rows.append({
+                    'Week': f"w/c {ws.strftime('%d/%m')}",
+                    'Check-ins': stays,
+                    'Guests': guests,
+                    'Revenue': f"£{rev:,.0f}" if rev > 0 else '—',
+                    'Status': '⚠️ Quiet' if stays == 0 and i > 0 else ('🔥 Busy' if stays >= 10 else ''),
+                })
+            df_room_weeks = pd.DataFrame(room_week_rows)
+            st.dataframe(df_room_weeks, use_container_width=True, hide_index=True)
+
+            quiet_rooms = df_room_weeks[df_room_weeks['Status'] == '⚠️ Quiet']
+            if len(quiet_rooms) > 0:
+                st.warning(f"⚠️ No room check-ins: {', '.join(quiet_rooms['Week'].tolist())}")
+
+            # By property
+            if 'venue_name' in df_rooms_future.columns:
+                st.markdown("**By property — all upcoming**")
+                by_prop = df_rooms_future.groupby('venue_name').agg(
+                    Stays=('party_size', 'count'),
+                    Guests=('party_size', 'sum'),
+                    Nights=('nights', 'sum'),
+                    Revenue=('total_value', 'sum'),
+                ).reset_index().sort_values('Stays', ascending=False)
+                by_prop['Revenue'] = by_prop['Revenue'].apply(lambda x: f"£{x:,.0f}" if x > 0 else '—')
+                by_prop.columns = ['Property', 'Stays', 'Guests', 'Nights', 'Revenue']
+                st.dataframe(by_prop, use_container_width=True, hide_index=True)
+
+            # Weekend check-in highlights
+            df_rooms_future['dow'] = df_rooms_future['checkin_dt'].dt.day_name()
+            weekend_upcoming = df_rooms_future[df_rooms_future['dow'].isin(['Friday', 'Saturday', 'Sunday'])]
+            if len(weekend_upcoming) > 0:
+                st.markdown("**Upcoming weekend check-ins**")
+                wknd = weekend_upcoming[['checkin_dt', 'venue_name', 'guest_name', 'party_size', 'nights']].copy()
+                wknd['checkin_dt'] = wknd['checkin_dt'].dt.strftime('%a %d/%m')
+                wknd.columns = ['Check-in', 'Property', 'Guest', 'Party', 'Nights']
+                st.dataframe(wknd.sort_values('Check-in'), use_container_width=True, hide_index=True)
+        else:
+            st.info("No upcoming room stays found in loaded data. Check the date range in Rooms Intelligence.")
