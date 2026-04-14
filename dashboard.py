@@ -1017,9 +1017,9 @@ with tab_operations:
         def count_visits(guest_email, guest_phone, guest_name):
             dining = 0
             rooms  = 0
-            norm_email = guest_email.lower().strip() if guest_email else ''
-            norm_phone = re.sub(r'\D', '', guest_phone) if guest_phone else ''
-            norm_name = guest_name.lower().strip() if guest_name else ''
+            norm_email = str(guest_email).lower().strip() if guest_email else ''
+            norm_phone = re.sub(r'\D', '', str(guest_phone)) if guest_phone else ''
+            norm_name = str(guest_name).lower().strip() if guest_name else ''
 
             def matches_row(row_email, row_phone, row_name):
                 if norm_email and str(row_email).lower().strip() == norm_email:
