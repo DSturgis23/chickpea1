@@ -55,7 +55,7 @@ from pub_mapping import get_all_eviivo_properties
 st.title("Chickpea Pubs - Reservations Dashboard")
 
 # Create tabs
-tab_operations, tab_analytics, tab_marketing, tab_sales, tab_rooms, tab_projections = st.tabs(["📅 Operations", "📊 Analytics", "📣 Marketing", "🍽️ Sales & Food", "🛏️ Rooms Intelligence", "🔮 Projections"])
+tab_operations, tab_analytics, tab_marketing, tab_sales, tab_rooms, tab_projections, tab_reports = st.tabs(["📅 Operations", "📊 Analytics", "📣 Marketing", "🍽️ Sales & Food", "🛏️ Rooms Intelligence", "🔮 Projections", "📋 Reports"])
 
 # Initialize clients
 @st.cache_resource
@@ -128,6 +128,23 @@ def load_analytics_reservations(_client, from_date_str, to_date_str):
         return []
     resp = _client.get_reservations(from_date=from_date_str, to_date=to_date_str)
     return resp.get("data", {}).get("results", []) if resp else []
+
+@st.cache_data(ttl=1800, show_spinner=False)  # Cache for 30 minutes
+def load_eviivo_bookings(_client, from_date_str, to_date_str):
+    """Load Eviivo historical bookings with caching to avoid repeated slow API calls."""
+    from pub_mapping import get_all_eviivo_properties
+    if not _client._ensure_authenticated():
+        return []
+    try:
+        property_mappings = get_all_eviivo_properties()
+        return _client.get_all_historical_bookings(
+            property_mappings,
+            checkin_from=from_date_str,
+            checkin_to=to_date_str,
+        )
+    except Exception as e:
+        print(f"Eviivo load error: {e}")
+        return []
 
 @st.cache_data(ttl=600, show_spinner=False)  # Cache for 10 minutes
 def load_analytics_feedback(_client, from_date_str, to_date_str):
@@ -402,6 +419,19 @@ with tab_operations:
 
     # Venue filter - exclude group-level entries
     venue_names = ["All Pubs"] + sorted([v['name'].strip() for v in venues if 'chickpea' not in v['name'].lower()])
+
+    # --- VENUE DIAGNOSTIC ---
+    with st.sidebar.expander("🔍 Venues from API", expanded=False):
+        if venues:
+            for v in sorted(venues, key=lambda x: x.get('name', '')):
+                st.caption(f"• {v.get('name', '—')}  `{v.get('id', '—')[:12]}…`")
+            expected = ["The Bell & Crown", "The Dog & Gun", "The Fleur de Lys",
+                        "The Grosvenor Arms", "The Manor House Inn", "The Pembroke Arms", "The Queen's Head"]
+            missing = [e for e in expected if not any(e.lower() in v.get('name','').lower() for v in venues)]
+            if missing:
+                st.warning("Not returned by API: " + ", ".join(missing))
+        else:
+            st.warning("No venues returned by API.")
     with filter_col1:
         selected_venue = st.selectbox("Pub", venue_names, key="ops_venue")
 
@@ -807,7 +837,10 @@ with tab_operations:
             vip_df = df_filtered[df_filtered.get('is_vip', pd.Series(False, index=df_filtered.index)) == True] if 'is_vip' in df_filtered.columns else pd.DataFrame()
             loyalty_df = df_filtered[df_filtered['loyalty_tier'].notna() & (df_filtered['loyalty_tier'] != '')] if 'loyalty_tier' in df_filtered.columns else pd.DataFrame()
             if len(vip_df) > 0 or len(loyalty_df) > 0:
-                for _, row in pd.concat([vip_df, loyalty_df]).drop_duplicates().iterrows():
+                _vip_combined = pd.concat([vip_df, loyalty_df])
+                _id_col = next((c for c in ['id', 'reservation_id', 'booking_id'] if c in _vip_combined.columns), None)
+                _vip_combined = _vip_combined.drop_duplicates(subset=[_id_col]) if _id_col else _vip_combined.drop_duplicates(subset=['guest_name', 'time'])
+                for _, row in _vip_combined.iterrows():
                     tier = row.get('loyalty_tier', 'VIP')
                     st.info(f"**{row.get('guest_name', 'Guest')}** ({row.get('venue_name', '')} @ {row.get('time', '')}) — {tier}")
             else:
@@ -983,7 +1016,8 @@ with tab_operations:
         df_eviivo_hist = pd.DataFrame(eviivo_hist) if eviivo_hist else pd.DataFrame()
 
         def count_visits(guest_email, guest_phone, guest_name):
-            total = 0
+            dining = 0
+            rooms  = 0
             norm_email = guest_email.lower().strip() if guest_email else ''
             norm_phone = re.sub(r'\D', '', guest_phone) if guest_phone else ''
             norm_name = guest_name.lower().strip() if guest_name else ''
@@ -1000,12 +1034,12 @@ with tab_operations:
             if len(df_hist) > 0:
                 for _, r in df_hist.iterrows():
                     if matches_row(r.get('email',''), r.get('phone_number',''), r.get('guest_name','')):
-                        total += 1
+                        dining += 1
             if len(df_eviivo_hist) > 0:
                 for _, r in df_eviivo_hist.iterrows():
                     if matches_row(r.get('email',''), r.get('phone',''), r.get('guest_name','')):
-                        total += 1
-            return total if total > 0 else None
+                        rooms += 1
+            return (dining, rooms) if (dining + rooms) > 0 else None
 
         def find_table_booking(guest_email, guest_phone, guest_name):
             if len(df_filtered) == 0:
@@ -1102,7 +1136,8 @@ with tab_operations:
                     'Party': e['party_size'],
                     'Check-in': e['checkin_fmt'],
                     'Check-out': e['checkout_fmt'],
-                    'Prev. Visits': e['visits'] if e['visits'] else '—',
+                    'Dining Visits': str(e['visits'][0]) if e['visits'] else '—',
+                    'Room Stays': str(e['visits'][1]) if e['visits'] else '—',
                     'Table Today': f"{e['table_match'].get('time','?')} (party of {e['table_match'].get('party_size','?')})" if e['table_match'] is not None else '—',
                     'Flags': e['flags'],
                 }
@@ -1120,7 +1155,13 @@ with tab_operations:
                 for e in flagged:
                     parts = []
                     if e['visits']:
-                        parts.append(f"⭐ **{e['visits']} previous visit{'s' if e['visits'] != 1 else ''}**")
+                        dining_v, rooms_v = e['visits']
+                        visit_parts = []
+                        if dining_v:
+                            visit_parts.append(f"{dining_v} dining")
+                        if rooms_v:
+                            visit_parts.append(f"{rooms_v} room {'stay' if rooms_v == 1 else 'stays'}")
+                        parts.append(f"⭐ **Previous visits: {', '.join(visit_parts)}**")
                     if e['table_match'] is not None:
                         tm = e['table_match']
                         parts.append(f"🍽️ Table booked at **{tm.get('time','?')}**, party of {tm.get('party_size','?')}")
@@ -1798,6 +1839,114 @@ with tab_marketing:
             else:
                 st.info("No guest name data available.")
 
+            # === COMBINED REVENUE ===
+            st.markdown("---")
+            st.markdown("### 💰 Combined Guest Value — Rooms + Dining")
+            st.caption("Matches guests across eviivo stays and Tevalis dining spend by email, phone and name.")
+
+            eviivo_hist_raw = st.session_state.get('eviivo_historical', [])
+            sf_res_raw = st.session_state.get('sf_reservations', [])
+
+            if not eviivo_hist_raw:
+                st.info("Click **Refresh Data** in the sidebar to load eviivo historical stays.")
+            elif not sf_res_raw:
+                st.info("Load Sales & Food data first — go to the 🍽️ Sales & Food tab and click **Load Sales Data**.")
+            else:
+                import re as _re
+
+                def _norm_email(e):
+                    return str(e).lower().strip() if e else ''
+
+                def _norm_phone(p):
+                    return _re.sub(r'\D', '', str(p))[-10:] if p else ''
+
+                def _norm_name(n):
+                    return str(n).lower().strip() if n else ''
+
+                # Build eviivo guest spend dict keyed by identifiers
+                room_guests = {}
+                for stay in eviivo_hist_raw:
+                    email = _norm_email(stay.get('email', ''))
+                    phone = _norm_phone(stay.get('phone', ''))
+                    name = _norm_name(stay.get('guest_name', ''))
+                    value = float(stay.get('total_value', 0) or 0)
+                    venue = stay.get('venue_name', '')
+                    key = email or phone or name
+                    if not key:
+                        continue
+                    if key not in room_guests:
+                        room_guests[key] = {'name': stay.get('guest_name', ''), 'room_spend': 0, 'room_stays': 0, 'room_venue': venue, 'email': email, 'phone': phone}
+                    room_guests[key]['room_spend'] += value
+                    room_guests[key]['room_stays'] += 1
+
+                # Build dining spend from POS tickets
+                dining_guests = {}
+                for r in sf_res_raw:
+                    email = _norm_email(r.get('email', ''))
+                    phone = _norm_phone(r.get('phone_number', ''))
+                    fname = r.get('first_name', '') or ''
+                    lname = r.get('last_name', '') or ''
+                    name = _norm_name(f"{fname} {lname}".strip())
+                    venue = venue_map.get(r.get('venue_id', ''), 'Unknown')
+                    spend = sum(
+                        t.get('subtotal', 0) or 0
+                        for t in (r.get('pos_tickets') or [])
+                        if t.get('source') == 'TEVALIS'
+                    )
+                    if spend == 0:
+                        continue
+                    key = email or phone or name
+                    if not key:
+                        continue
+                    if key not in dining_guests:
+                        dining_guests[key] = {'name': f"{fname} {lname}".strip(), 'dining_spend': 0, 'dining_visits': 0, 'dining_venue': venue, 'email': email, 'phone': phone}
+                    dining_guests[key]['dining_spend'] += spend
+                    dining_guests[key]['dining_visits'] += 1
+
+                # Match and combine
+                combined = {}
+                all_keys = set(room_guests.keys()) | set(dining_guests.keys())
+                for key in all_keys:
+                    r = room_guests.get(key, {})
+                    d = dining_guests.get(key, {})
+                    name = r.get('name') or d.get('name') or key
+                    combined[key] = {
+                        'Guest': name.title(),
+                        'Room Stays': r.get('room_stays', 0),
+                        'Room Spend': r.get('room_spend', 0),
+                        'Dining Visits': d.get('dining_visits', 0),
+                        'Dining Spend': d.get('dining_spend', 0),
+                        'Total Spend': r.get('room_spend', 0) + d.get('dining_spend', 0),
+                        'Properties': ', '.join(filter(None, set([r.get('room_venue', ''), d.get('dining_venue', '')]))),
+                    }
+
+                df_combined = pd.DataFrame(combined.values())
+                df_combined = df_combined[df_combined['Total Spend'] > 0].sort_values('Total Spend', ascending=False)
+
+                both = df_combined[(df_combined['Room Stays'] > 0) & (df_combined['Dining Visits'] > 0)]
+                room_only = df_combined[(df_combined['Room Stays'] > 0) & (df_combined['Dining Visits'] == 0)]
+                dining_only = df_combined[(df_combined['Room Stays'] == 0) & (df_combined['Dining Visits'] > 0)]
+
+                cv1, cv2, cv3, cv4 = st.columns(4)
+                cv1.metric("Guests with Rooms + Dining", len(both))
+                cv2.metric("Avg Combined Spend", f"£{df_combined['Total Spend'].mean():.0f}" if len(df_combined) else "—")
+                cv3.metric("Room-Only Guests", len(room_only), help="Never dined with us — upsell opportunity")
+                cv4.metric("Dining-Only Guests", len(dining_only), help="Never stayed — upsell opportunity")
+
+                if len(both) > 0:
+                    st.markdown("**Top guests by combined spend (rooms + dining)**")
+                    display = both[['Guest', 'Room Stays', 'Room Spend', 'Dining Visits', 'Dining Spend', 'Total Spend', 'Properties']].copy()
+                    display['Room Spend'] = display['Room Spend'].apply(lambda x: f"£{x:,.0f}")
+                    display['Dining Spend'] = display['Dining Spend'].apply(lambda x: f"£{x:,.0f}")
+                    display['Total Spend'] = display['Total Spend'].apply(lambda x: f"£{x:,.0f}")
+                    st.dataframe(display.head(20), use_container_width=True, hide_index=True)
+
+                if len(room_only) > 0:
+                    with st.expander(f"🛏️ {len(room_only)} room guests who have never dined with us"):
+                        ro = room_only[['Guest', 'Room Stays', 'Room Spend', 'Properties']].copy()
+                        ro['Room Spend'] = ro['Room Spend'].apply(lambda x: f"£{x:,.0f}")
+                        st.dataframe(ro.head(20), use_container_width=True, hide_index=True)
+
             # === GUEST INSIGHTS ===
             st.markdown("---")
             st.markdown("### Guest Insights")
@@ -2106,6 +2255,36 @@ with tab_sales:
                 display_tickets = df_tickets[['date', 'venue', 'guest', 'covers', 'subtotal', 'tax', 'service_charge', 'total', 'spend_per_head', 'status']].copy()
                 display_tickets.columns = ['Date', 'Pub', 'Guest', 'Covers', 'Subtotal (£)', 'Tax (£)', 'Service Charge (£)', 'Total (£)', 'Spend/Head (£)', 'Status']
                 st.dataframe(display_tickets, use_container_width=True, hide_index=True)
+
+            st.markdown("---")
+            st.markdown("### Download Report")
+            if st.button("Generate PDF Report", key="sf_pdf_btn"):
+                with st.spinner("Building PDF…"):
+                    try:
+                        from sales_pdf import generate_sales_pdf
+                        pdf_bytes = generate_sales_pdf(
+                            tickets=tickets,
+                            items=items_all,
+                            start_date=sf_from,
+                            end_date=sf_to,
+                            venue_name=sf_venue,
+                        )
+                        filename = (
+                            f"chickpea_sales_"
+                            f"{sf_from.strftime('%b%Y').lower()}"
+                            + (f"_{sf_to.strftime('%b%Y').lower()}" if sf_from.strftime('%b%Y') != sf_to.strftime('%b%Y') else "")
+                            + ".pdf"
+                        )
+                        st.success("PDF ready.")
+                        st.download_button(
+                            label="Download PDF",
+                            data=pdf_bytes,
+                            file_name=filename,
+                            mime="application/pdf",
+                            type="primary",
+                        )
+                    except Exception as e:
+                        st.error(f"PDF generation failed: {e}")
     else:
         st.info("Select a date range and click **Load Sales Data** to view Tevalis POS data.")
 
@@ -2115,6 +2294,16 @@ with tab_rooms:
     st.caption("Historical analysis and forward occupancy across all Chickpea properties")
 
     from pub_mapping import EVIIVO_PROPERTY_MAPPINGS
+
+    ROOM_COUNTS = {
+        "The Bell & Crown":    6,
+        "The Dog & Gun":       6,
+        "The Fleur de Lys":    9,
+        "The Grosvenor Arms":  9,
+        "The Manor House Inn": 9,
+        "The Pembroke Arms":   9,
+        "The Queen's Head":    4,
+    }
 
     ri_col1, ri_col2, ri_col3 = st.columns([1, 1, 2])
     with ri_col1:
@@ -2131,18 +2320,17 @@ with tab_rooms:
 
     if st.button("Load Rooms Data", type="primary", key="load_rooms"):
         with st.spinner("Fetching room booking data from eviivo..."):
-            property_mappings = get_all_eviivo_properties()
             try:
-                if eviivo_client._ensure_authenticated():
-                    all_stays = eviivo_client.get_all_historical_bookings(
-                        property_mappings,
-                        checkin_from=ri_from,
-                        checkin_to=ri_to,
-                    )
-                    st.session_state['ri_data'] = all_stays
+                all_stays = load_eviivo_bookings(
+                    eviivo_client,
+                    ri_from.strftime("%Y-%m-%d"),
+                    ri_to.strftime("%Y-%m-%d"),
+                )
+                st.session_state['ri_data'] = all_stays
+                if all_stays:
                     st.success(f"Loaded {len(all_stays)} room bookings ({ri_from.strftime('%d/%m/%Y')} – {ri_to.strftime('%d/%m/%Y')})")
                 else:
-                    st.error("Could not authenticate with eviivo. Check credentials.")
+                    st.error("No data returned — check eviivo credentials in Settings → Secrets.")
             except Exception as e:
                 st.error(f"Error loading room data: {e}")
 
@@ -2193,26 +2381,233 @@ with tab_rooms:
                 df_past = df_confirmed[df_confirmed['checkin_dt'] < today_dt]
                 df_future = df_confirmed[df_confirmed['checkin_dt'] >= today_dt]
 
-                # --- HEADLINE METRICS ---
+                # --- CORE METRICS ---
                 total_stays = len(df_confirmed)
                 avg_nights = df_confirmed['nights'].mean() if total_stays else 0
                 total_revenue = df_confirmed['total_value'].sum()
                 cancel_count = len(df_cancelled)
                 cancel_rate = cancel_count / max(len(df_ri), 1) * 100
-                total_nights_sold = df_confirmed['nights'].sum()
-                avg_rate = total_revenue / total_nights_sold if total_nights_sold > 0 else 0
+                total_nights_sold = int(df_confirmed['nights'].sum())
+                adr = total_revenue / total_nights_sold if total_nights_sold > 0 else 0
                 upcoming_count = len(df_future)
 
-                m1, m2, m3, m4, m5, m6 = st.columns(6)
+                # Occupancy & RevPAR — requires ROOM_COUNTS
+                period_days = max((ri_to - ri_from).days, 1)
+                if ri_venue == "All Properties":
+                    total_avail_nights = sum(ROOM_COUNTS.values()) * period_days
+                else:
+                    total_avail_nights = ROOM_COUNTS.get(ri_venue, 0) * period_days
+                occupancy_pct = total_nights_sold / total_avail_nights * 100 if total_avail_nights > 0 else None
+                revpar = total_revenue / total_avail_nights if total_avail_nights > 0 else None
+
+                # --- HEADLINE KPIs ---
+                m1, m2, m3, m4 = st.columns(4)
                 m1.metric("Confirmed Stays", f"{total_stays:,}")
-                m2.metric("Avg Length of Stay", f"{avg_nights:.1f} nights")
+                m2.metric("Nights Sold", f"{total_nights_sold:,}")
                 m3.metric("Upcoming Bookings", f"{upcoming_count:,}")
-                m4.metric("Room Revenue", f"£{total_revenue:,.0f}")
-                m5.metric("Avg Rate / Night", f"£{avg_rate:.0f}")
-                m6.metric("Cancellation Rate", f"{cancel_rate:.1f}%",
+                m4.metric("Cancellation Rate", f"{cancel_rate:.1f}%",
                           delta=f"{cancel_count} cancelled", delta_color="inverse")
 
+                m5, m6, m7, m8 = st.columns(4)
+                m5.metric("Room Revenue", f"£{total_revenue:,.0f}" if total_revenue > 0 else "—")
+                m6.metric("ADR", f"£{adr:.2f}" if adr > 0 else "—", help="Average Daily Rate = Revenue ÷ Nights Sold")
+                m7.metric("Occupancy", f"{occupancy_pct:.1f}%" if occupancy_pct is not None else "—",
+                          help=f"Nights sold ÷ available room nights ({total_avail_nights:,} available)")
+                m8.metric("RevPAR", f"£{revpar:.2f}" if revpar is not None else "—",
+                          help="Revenue Per Available Room = Revenue ÷ Available Room Nights")
+
                 st.markdown("---")
+
+                # --- OCCUPANCY, ADR & REVPAR BY PROPERTY ---
+                if 'venue_name' in df_confirmed.columns and ri_venue == "All Properties":
+                    st.markdown("### 🏨 Occupancy, ADR & RevPAR by Property")
+                    st.caption(f"Based on {period_days} days in period. Available nights = rooms × days.")
+                    import plotly.graph_objects as go
+                    import plotly.express as px
+                    from calendar import monthrange as _mrange
+
+                    occ_rows = []
+                    for vn in sorted(df_confirmed['venue_name'].unique()):
+                        rc = ROOM_COUNTS.get(vn, 0)
+                        if rc == 0:
+                            continue
+                        vdf = df_confirmed[df_confirmed['venue_name'] == vn]
+                        ns = int(vdf['nights'].sum())
+                        rev = vdf['total_value'].sum()
+                        avail = rc * period_days
+                        occ = ns / avail * 100 if avail > 0 else 0
+                        v_adr = rev / ns if ns > 0 else 0
+                        v_revpar = rev / avail if avail > 0 else 0
+                        occ_rows.append({
+                            'Property': vn,
+                            'Rooms': rc,
+                            'Avail Nights': avail,
+                            'Nights Sold': ns,
+                            'Occupancy %': round(occ, 1),
+                            'Revenue': f"£{rev:,.0f}" if rev > 0 else "—",
+                            'ADR': f"£{v_adr:.2f}" if v_adr > 0 else "—",
+                            'RevPAR': f"£{v_revpar:.2f}" if v_revpar > 0 else "—",
+                        })
+
+                    if occ_rows:
+                        df_occ = pd.DataFrame(occ_rows)
+                        st.dataframe(df_occ, use_container_width=True, hide_index=True)
+
+                        # Bar charts side by side
+                        chart_col1, chart_col2 = st.columns(2)
+                        with chart_col1:
+                            fig_occ = px.bar(
+                                df_occ, x='Occupancy %', y='Property', orientation='h',
+                                title='Occupancy % by Property',
+                                color='Occupancy %',
+                                color_continuous_scale=[[0,'#C8882A'],[0.5,'#C8DFC8'],[1,'#1C3829']],
+                                text='Occupancy %',
+                            )
+                            fig_occ.update_traces(texttemplate='%{text:.1f}%', textposition='outside')
+                            fig_occ.update_layout(
+                                showlegend=False, coloraxis_showscale=False,
+                                plot_bgcolor='white', height=300,
+                                margin=dict(l=0, r=40, t=40, b=0),
+                                yaxis_title=None, xaxis_title='Occupancy %',
+                            )
+                            st.plotly_chart(fig_occ, use_container_width=True)
+
+                        with chart_col2:
+                            # Extract numeric RevPAR for chart
+                            df_occ_chart = df_confirmed.groupby('venue_name').apply(
+                                lambda g: pd.Series({
+                                    'RevPAR': g['total_value'].sum() / (ROOM_COUNTS.get(g.name, 1) * period_days)
+                                })
+                            ).reset_index()
+                            df_occ_chart.columns = ['Property', 'RevPAR']
+                            df_occ_chart = df_occ_chart[df_occ_chart['RevPAR'] > 0].sort_values('RevPAR')
+                            if not df_occ_chart.empty:
+                                fig_revpar = px.bar(
+                                    df_occ_chart, x='RevPAR', y='Property', orientation='h',
+                                    title='RevPAR by Property',
+                                    color='RevPAR',
+                                    color_continuous_scale=[[0,'#C8882A'],[0.5,'#C8DFC8'],[1,'#1C3829']],
+                                    text='RevPAR',
+                                )
+                                fig_revpar.update_traces(texttemplate='£%{text:.2f}', textposition='outside')
+                                fig_revpar.update_layout(
+                                    showlegend=False, coloraxis_showscale=False,
+                                    plot_bgcolor='white', height=300,
+                                    margin=dict(l=0, r=60, t=40, b=0),
+                                    yaxis_title=None, xaxis_title='RevPAR (£)',
+                                )
+                                st.plotly_chart(fig_revpar, use_container_width=True)
+
+                    st.markdown("---")
+
+                # --- MONTHLY TRENDS ---
+                df_confirmed['checkin_month'] = df_confirmed['checkin_dt'].dt.to_period('M')
+                monthly_months = sorted(df_confirmed['checkin_month'].dropna().unique())
+                if len(monthly_months) >= 2:
+                    st.markdown("### 📈 Monthly Trends")
+                    import plotly.graph_objects as go
+
+                    monthly_rows = []
+                    for m in monthly_months:
+                        mdf = df_confirmed[df_confirmed['checkin_month'] == m]
+                        m_date = m.to_timestamp()
+                        days_in_month = _mrange(m_date.year, m_date.month)[1] if 'plotly.graph_objects' in str(type(go)) or True else 30
+                        from calendar import monthrange as _mr2
+                        days_in_month = _mr2(m_date.year, m_date.month)[1]
+                        # Clamp to our period
+                        m_start = max(m_date.date(), ri_from)
+                        m_end = min((m_date + pd.offsets.MonthEnd(0)).date(), ri_to)
+                        days_in_period = max((m_end - m_start).days + 1, 1)
+
+                        rc_total = sum(ROOM_COUNTS.values()) if ri_venue == "All Properties" else ROOM_COUNTS.get(ri_venue, 0)
+                        avail_m = rc_total * days_in_period
+                        ns_m = int(mdf['nights'].sum())
+                        rev_m = mdf['total_value'].sum()
+                        occ_m = ns_m / avail_m * 100 if avail_m > 0 else 0
+                        adr_m = rev_m / ns_m if ns_m > 0 else 0
+                        revpar_m = rev_m / avail_m if avail_m > 0 else 0
+                        monthly_rows.append({
+                            'Month': m_date.strftime('%b %Y'),
+                            'Stays': len(mdf),
+                            'Nights Sold': ns_m,
+                            'Occupancy %': round(occ_m, 1),
+                            'Revenue': round(rev_m, 2),
+                            'ADR': round(adr_m, 2),
+                            'RevPAR': round(revpar_m, 2),
+                        })
+
+                    df_monthly = pd.DataFrame(monthly_rows)
+
+                    # Trend charts
+                    tc1, tc2 = st.columns(2)
+                    with tc1:
+                        fig_trend = go.Figure()
+                        fig_trend.add_trace(go.Bar(
+                            x=df_monthly['Month'], y=df_monthly['Occupancy %'],
+                            name='Occupancy %', marker_color='#1C3829', opacity=0.8,
+                        ))
+                        fig_trend.update_layout(
+                            title='Monthly Occupancy %', plot_bgcolor='white',
+                            height=280, margin=dict(l=0,r=0,t=40,b=0),
+                            yaxis=dict(ticksuffix='%', gridcolor='#eeeeee'),
+                            xaxis_title=None,
+                        )
+                        st.plotly_chart(fig_trend, use_container_width=True)
+
+                    with tc2:
+                        fig_adr = go.Figure()
+                        fig_adr.add_trace(go.Scatter(
+                            x=df_monthly['Month'], y=df_monthly['ADR'],
+                            name='ADR', mode='lines+markers',
+                            line=dict(color='#1C3829', width=2),
+                            marker=dict(size=6),
+                        ))
+                        fig_adr.add_trace(go.Scatter(
+                            x=df_monthly['Month'], y=df_monthly['RevPAR'],
+                            name='RevPAR', mode='lines+markers',
+                            line=dict(color='#C8882A', width=2, dash='dot'),
+                            marker=dict(size=6),
+                        ))
+                        fig_adr.update_layout(
+                            title='Monthly ADR vs RevPAR', plot_bgcolor='white',
+                            height=280, margin=dict(l=0,r=0,t=40,b=0),
+                            yaxis=dict(tickprefix='£', gridcolor='#eeeeee'),
+                            xaxis_title=None, legend=dict(orientation='h', y=-0.2),
+                        )
+                        st.plotly_chart(fig_adr, use_container_width=True)
+
+                    # Monthly summary table
+                    with st.expander("Monthly summary table"):
+                        df_monthly_disp = df_monthly.copy()
+                        df_monthly_disp['Revenue'] = df_monthly_disp['Revenue'].apply(lambda x: f"£{x:,.0f}" if x > 0 else "—")
+                        df_monthly_disp['ADR'] = df_monthly_disp['ADR'].apply(lambda x: f"£{x:.2f}" if x > 0 else "—")
+                        df_monthly_disp['RevPAR'] = df_monthly_disp['RevPAR'].apply(lambda x: f"£{x:.2f}" if x > 0 else "—")
+                        df_monthly_disp['Occupancy %'] = df_monthly_disp['Occupancy %'].apply(lambda x: f"{x:.1f}%")
+                        st.dataframe(df_monthly_disp, use_container_width=True, hide_index=True)
+
+                    st.markdown("---")
+
+                # --- BOOKING PACE ---
+                if 'created' in df_ri.columns:
+                    st.markdown("### ⚡ Booking Pace")
+                    st.caption("Bookings made recently for future arrivals — useful for spotting pick-up trends.")
+                    df_ri['created_dt'] = pd.to_datetime(df_ri['created'], errors='coerce')
+                    today_ts = pd.Timestamp(date.today())
+                    pace_rows = []
+                    for window, label in [(7, 'Last 7 days'), (14, 'Last 14 days'), (30, 'Last 30 days')]:
+                        cutoff = today_ts - timedelta(days=window)
+                        new_bookings = df_ri[
+                            (df_ri['created_dt'] >= cutoff) &
+                            (df_ri['status'] != 'Cancelled')
+                        ]
+                        pace_rows.append({
+                            'Window': label,
+                            'New Bookings': len(new_bookings),
+                            'Nights Booked': int(new_bookings['nights'].sum()) if len(new_bookings) > 0 else 0,
+                            'Revenue': f"£{new_bookings['total_value'].sum():,.0f}" if len(new_bookings) > 0 and new_bookings['total_value'].sum() > 0 else "—",
+                        })
+                    st.dataframe(pd.DataFrame(pace_rows), use_container_width=True, hide_index=True)
+                    st.markdown("---")
 
                 # --- BOOKING CHANNELS ---
                 st.markdown("### 📡 Booking Channels")
@@ -2354,7 +2749,7 @@ with tab_rooms:
 
                 st.markdown("---")
 
-                # --- REVENUE BY PROPERTY ---
+                # --- REVENUE & RATE ANALYSIS ---
                 st.markdown("### 💰 Revenue & Rate Analysis")
                 if total_revenue > 0:
                     rev_by_venue = df_confirmed.groupby('venue_name').agg(
@@ -2363,25 +2758,53 @@ with tab_rooms:
                         Nights=('nights', 'sum'),
                         Guests=('party_size', 'sum'),
                     ).reset_index()
-                    rev_by_venue['ADR'] = (rev_by_venue['Revenue'] / rev_by_venue['Nights'].replace(0, 1)).round(2)
-                    rev_by_venue['Rev/Guest'] = (rev_by_venue['Revenue'] / rev_by_venue['Guests'].replace(0, 1)).round(2)
-                    rev_by_venue['Revenue'] = rev_by_venue['Revenue'].apply(lambda x: f"£{x:,.0f}")
-                    rev_by_venue['ADR'] = rev_by_venue['ADR'].apply(lambda x: f"£{x:.0f}")
-                    rev_by_venue['Rev/Guest'] = rev_by_venue['Rev/Guest'].apply(lambda x: f"£{x:.0f}")
-                    rev_by_venue.columns = ['Property', 'Stays', 'Total Revenue', 'Nights Sold', 'Total Guests', 'ADR (£)', 'Rev / Guest (£)']
-                    st.dataframe(rev_by_venue.sort_values('Stays', ascending=False), use_container_width=True, hide_index=True)
-                    st.caption("ADR = Average Daily Rate. Revenue figures depend on rates being set in eviivo.")
+                    rev_by_venue['ADR'] = rev_by_venue['Revenue'] / rev_by_venue['Nights'].replace(0, 1)
+                    rev_by_venue['Rev/Guest'] = rev_by_venue['Revenue'] / rev_by_venue['Guests'].replace(0, 1)
+                    # Add RevPAR where room count is known
+                    rev_by_venue['Avail Nights'] = rev_by_venue['venue_name'].map(
+                        lambda v: ROOM_COUNTS.get(v, 0) * period_days
+                    )
+                    rev_by_venue['RevPAR'] = rev_by_venue.apply(
+                        lambda r: r['Revenue'] / r['Avail Nights'] if r['Avail Nights'] > 0 else None, axis=1
+                    )
+                    rev_by_venue['Occ %'] = rev_by_venue.apply(
+                        lambda r: r['Nights'] / r['Avail Nights'] * 100 if r['Avail Nights'] > 0 else None, axis=1
+                    )
+                    # Format for display
+                    disp = rev_by_venue.copy()
+                    disp['Revenue'] = disp['Revenue'].apply(lambda x: f"£{x:,.0f}")
+                    disp['ADR'] = disp['ADR'].apply(lambda x: f"£{x:.2f}")
+                    disp['Rev/Guest'] = disp['Rev/Guest'].apply(lambda x: f"£{x:.2f}")
+                    disp['RevPAR'] = disp['RevPAR'].apply(lambda x: f"£{x:.2f}" if x is not None else "—")
+                    disp['Occ %'] = disp['Occ %'].apply(lambda x: f"{x:.1f}%" if x is not None else "—")
+                    disp = disp.drop(columns=['Avail Nights'])
+                    disp.columns = ['Property', 'Stays', 'Revenue', 'Nights Sold', 'Guests', 'ADR', 'Rev/Guest', 'RevPAR', 'Occ %']
+                    st.dataframe(disp.sort_values('Stays', ascending=False), use_container_width=True, hide_index=True)
+                    st.caption("ADR = Revenue ÷ Nights Sold. RevPAR = Revenue ÷ Available Room Nights. Revenue figures depend on rates being set in eviivo.")
 
-                    # Top revenue weeks
+                    # Top & bottom revenue weeks
                     if len(all_weeks) > 0:
-                        weekly_rev = df_confirmed.groupby('checkin_week')['total_value'].sum().reset_index()
+                        weekly_rev = df_confirmed.groupby('checkin_week').agg(
+                            Revenue=('total_value', 'sum'),
+                            Stays=('total_value', 'count'),
+                            Nights=('nights', 'sum'),
+                        ).reset_index()
                         weekly_rev['week_label'] = weekly_rev['checkin_week'].apply(lambda w: f"w/c {w.start_time.strftime('%d/%m/%y')}")
-                        weekly_rev = weekly_rev.sort_values('total_value', ascending=False).head(5)
-                        weekly_rev['total_value'] = weekly_rev['total_value'].apply(lambda x: f"£{x:,.0f}")
-                        weekly_rev = weekly_rev[['week_label', 'total_value']]
-                        weekly_rev.columns = ['Week', 'Revenue']
-                        st.markdown("**Top 5 weeks by revenue**")
-                        st.dataframe(weekly_rev, use_container_width=True, hide_index=True)
+                        weekly_rev['ADR'] = (weekly_rev['Revenue'] / weekly_rev['Nights'].replace(0, 1)).apply(lambda x: f"£{x:.2f}")
+                        weekly_rev['Revenue_fmt'] = weekly_rev['Revenue'].apply(lambda x: f"£{x:,.0f}")
+                        top5 = weekly_rev.sort_values('Revenue', ascending=False).head(5)
+                        rc1, rc2 = st.columns(2)
+                        with rc1:
+                            st.markdown("**Top 5 weeks by revenue**")
+                            st.dataframe(top5[['week_label','Revenue_fmt','Stays','ADR']].rename(
+                                columns={'week_label':'Week','Revenue_fmt':'Revenue','Stays':'Stays','ADR':'ADR'}
+                            ), use_container_width=True, hide_index=True)
+                        with rc2:
+                            st.markdown("**Bottom 5 weeks by revenue**")
+                            bottom5 = weekly_rev.sort_values('Revenue').head(5)
+                            st.dataframe(bottom5[['week_label','Revenue_fmt','Stays','ADR']].rename(
+                                columns={'week_label':'Week','Revenue_fmt':'Revenue','Stays':'Stays','ADR':'ADR'}
+                            ), use_container_width=True, hide_index=True)
                 else:
                     st.info("No revenue data available. Check that nightly rates are configured in eviivo.")
 
@@ -2440,6 +2863,35 @@ with tab_rooms:
                     st.markdown(f"Couples: **{couples}** ({couples/max(total_c,1)*100:.0f}%)")
                     st.markdown(f"Groups (3+): **{groups}** ({groups/max(total_c,1)*100:.0f}%)")
 
+            st.markdown("---")
+            st.markdown("### Download Report")
+            if st.button("Generate PDF Report", key="ri_pdf_btn"):
+                with st.spinner("Building PDF…"):
+                    try:
+                        from rooms_pdf import generate_rooms_pdf
+                        pdf_bytes = generate_rooms_pdf(
+                            stays_raw=stays_raw,
+                            start_date=ri_from,
+                            end_date=ri_to,
+                            venue_name=ri_venue,
+                        )
+                        filename = (
+                            f"chickpea_rooms_"
+                            f"{ri_from.strftime('%b%Y').lower()}"
+                            + (f"_{ri_to.strftime('%b%Y').lower()}" if ri_from.strftime('%b%Y') != ri_to.strftime('%b%Y') else "")
+                            + ".pdf"
+                        )
+                        st.success("PDF ready.")
+                        st.download_button(
+                            label="Download PDF",
+                            data=pdf_bytes,
+                            file_name=filename,
+                            mime="application/pdf",
+                            type="primary",
+                            key="ri_pdf_dl",
+                        )
+                    except Exception as e:
+                        st.error(f"PDF generation failed: {e}")
     else:
         st.info("Select a date range and click **Load Rooms Data** to view room intelligence.")
 
@@ -2632,3 +3084,305 @@ with tab_projections:
                 st.dataframe(wknd.sort_values('Check-in'), use_container_width=True, hide_index=True)
         else:
             st.info("No upcoming room stays found in loaded data. Check the date range in Rooms Intelligence.")
+
+# === REPORTS TAB ===
+with tab_reports:
+    st.subheader("📋 Reports")
+    st.caption("Auto-generated summaries from loaded data. Refresh Data in the sidebar to update.")
+
+    report_type = st.selectbox("Report type", ["Weekly Summary", "Monthly Snapshot"], key="report_type")
+
+    if report_type == "Weekly Summary":
+        # Week boundaries
+        week_start = date.today() - timedelta(days=date.today().weekday())
+        week_end = week_start + timedelta(days=6)
+        prev_week_start = week_start - timedelta(weeks=1)
+        prev_week_end = week_start - timedelta(days=1)
+        report_title = f"Weekly Summary — w/c {week_start.strftime('%d/%m/%Y')}"
+    else:
+        month_start = date.today().replace(day=1)
+        prev_month_end = month_start - timedelta(days=1)
+        prev_month_start = prev_month_end.replace(day=1)
+        report_title = f"Monthly Snapshot — {date.today().strftime('%B %Y')}"
+
+    st.markdown(f"## {report_title}")
+    st.markdown(f"*Generated {date.today().strftime('%A %d/%m/%Y')}*")
+
+    lines = [f"# {report_title}", f"Generated {date.today().strftime('%A %d/%m/%Y')}", ""]
+
+    # --- RESTAURANT PERFORMANCE ---
+    st.markdown("---")
+    st.markdown("### 🍽️ Restaurant Performance")
+
+    # Combine historical + future reservations for a complete picture
+    def _prep_res_df(raw):
+        if not raw:
+            return pd.DataFrame()
+        d = pd.DataFrame(raw)
+        if 'date' in d.columns:
+            d['res_date'] = pd.to_datetime(d['date'], errors='coerce').dt.date
+        if 'max_guests' in d.columns:
+            d['party_size'] = pd.to_numeric(d['max_guests'], errors='coerce').fillna(0).astype(int)
+        if 'venue_id' in d.columns:
+            d['venue_name'] = d['venue_id'].map(venue_map).fillna('Unknown')
+        if 'status_display' in d.columns:
+            d = d[~d['status_display'].isin(['Canceled', 'Cancelled'])]
+        return d
+
+    df_hist_report = _prep_res_df(historical)
+    df_future_report = _prep_res_df(reservations)
+
+    # Merge into one full dataset deduplicated by a reservation ID if available
+    id_col = next((c for c in ['id', 'reservation_id', 'booking_id'] if c in df_hist_report.columns or c in df_future_report.columns), None)
+    df_all_report = pd.concat([df_hist_report, df_future_report], ignore_index=True)
+    if id_col and id_col in df_all_report.columns:
+        df_all_report = df_all_report.drop_duplicates(subset=[id_col])
+
+    if len(df_all_report) > 0 and 'res_date' in df_all_report.columns:
+        if report_type == "Weekly Summary":
+            period_df = df_all_report[
+                (df_all_report['res_date'] >= week_start) &
+                (df_all_report['res_date'] <= week_end)
+            ]
+            prev_df = df_hist_report[
+                (df_hist_report['res_date'] >= prev_week_start) &
+                (df_hist_report['res_date'] <= prev_week_end)
+            ] if len(df_hist_report) > 0 else pd.DataFrame()
+            period_label = f"This week ({week_start.strftime('%d/%m')} – {week_end.strftime('%d/%m')})"
+            prev_label = f"Last week ({prev_week_start.strftime('%d/%m')} – {prev_week_end.strftime('%d/%m')})"
+        else:
+            period_df = df_all_report[
+                (df_all_report['res_date'] >= month_start) &
+                (df_all_report['res_date'] <= date.today() + timedelta(days=30))
+            ]
+            prev_df = df_hist_report[
+                (df_hist_report['res_date'] >= prev_month_start) &
+                (df_hist_report['res_date'] <= prev_month_end)
+            ] if len(df_hist_report) > 0 else pd.DataFrame()
+            period_label = f"This month ({month_start.strftime('%d/%m')})"
+            prev_label = f"Last month ({prev_month_start.strftime('%b')})"
+
+    if len(df_all_report) > 0 and 'res_date' in df_all_report.columns:
+
+        cur_res = len(period_df)
+        cur_covers = int(period_df['party_size'].sum()) if len(period_df) > 0 else 0
+        prev_res = len(prev_df)
+        prev_covers = int(prev_df['party_size'].sum()) if len(prev_df) > 0 else 0
+
+        rc1, rc2, rc3, rc4 = st.columns(4)
+        rc1.metric("Reservations", cur_res, delta=cur_res - prev_res if prev_res else None)
+        rc2.metric("Covers", cur_covers, delta=cur_covers - prev_covers if prev_covers else None)
+        rc3.metric(f"Prev. Reservations ({prev_label})", prev_res)
+        rc4.metric(f"Prev. Covers", prev_covers)
+
+        lines += [f"## Restaurant Performance", f"Reservations: {cur_res} (prev: {prev_res})", f"Covers: {cur_covers} (prev: {prev_covers})", ""]
+
+        # By pub
+        if len(period_df) > 0 and 'venue_name' in period_df.columns:
+            st.markdown(f"**By pub — {period_label}**")
+            by_pub_r = period_df.groupby('venue_name').agg(
+                Reservations=('party_size', 'count'),
+                Covers=('party_size', 'sum'),
+            ).reset_index()
+            # Add prev period
+            if len(prev_df) > 0 and 'venue_name' in prev_df.columns:
+                prev_by_pub = prev_df.groupby('venue_name').agg(Prev_Covers=('party_size', 'sum')).reset_index()
+                by_pub_r = by_pub_r.merge(prev_by_pub, on='venue_name', how='left').fillna(0)
+                by_pub_r['Prev_Covers'] = by_pub_r['Prev_Covers'].astype(int)
+                by_pub_r['Change'] = by_pub_r['Covers'] - by_pub_r['Prev_Covers']
+                by_pub_r['Change'] = by_pub_r['Change'].apply(lambda x: f"+{x}" if x > 0 else str(x))
+                by_pub_r.columns = ['Pub', 'Reservations', 'Covers', f'{prev_label} Covers', 'Change']
+            else:
+                by_pub_r.columns = ['Pub', 'Reservations', 'Covers']
+            by_pub_r = by_pub_r.sort_values('Covers', ascending=False)
+            st.dataframe(by_pub_r, use_container_width=True, hide_index=True)
+
+            top_pub = by_pub_r.iloc[0]['Pub'] if len(by_pub_r) > 0 else '—'
+            bottom_pub = by_pub_r.iloc[-1]['Pub'] if len(by_pub_r) > 0 else '—'
+            st.caption(f"🏆 Top performer: **{top_pub}** · Needs attention: **{bottom_pub}**")
+            lines += [f"Top performer: {top_pub}", f"Needs attention: {bottom_pub}", ""]
+    else:
+        st.info("No historical reservation data loaded. Click Refresh Data in the sidebar.")
+
+    # --- ROOMS PERFORMANCE ---
+    st.markdown("---")
+    st.markdown("### 🛏️ Rooms Performance")
+
+    eviivo_hist_r = st.session_state.get('eviivo_historical', [])
+    if eviivo_hist_r:
+        df_ev_r = pd.DataFrame(eviivo_hist_r)
+        df_ev_r['checkin_dt'] = pd.to_datetime(df_ev_r['date'], errors='coerce').dt.date
+        df_ev_r['nights'] = (pd.to_datetime(df_ev_r['checkout_date'], errors='coerce') - pd.to_datetime(df_ev_r['date'], errors='coerce')).dt.days.clip(lower=0)
+        df_ev_r['total_value'] = pd.to_numeric(df_ev_r['total_value'], errors='coerce').fillna(0)
+        df_ev_r['party_size'] = pd.to_numeric(df_ev_r['party_size'], errors='coerce').fillna(1).astype(int)
+        df_ev_r = df_ev_r[df_ev_r['status'] != 'Cancelled']
+
+        if report_type == "Weekly Summary":
+            ev_period = df_ev_r[(df_ev_r['checkin_dt'] >= week_start) & (df_ev_r['checkin_dt'] <= week_end)]
+            ev_prev = df_ev_r[(df_ev_r['checkin_dt'] >= prev_week_start) & (df_ev_r['checkin_dt'] <= prev_week_end)]
+        else:
+            ev_period = df_ev_r[(df_ev_r['checkin_dt'] >= month_start) & (df_ev_r['checkin_dt'] <= date.today())]
+            ev_prev = df_ev_r[(df_ev_r['checkin_dt'] >= prev_month_start) & (df_ev_r['checkin_dt'] <= prev_month_end)]
+
+        rm1, rm2, rm3, rm4 = st.columns(4)
+        rm1.metric("Room Stays", len(ev_period), delta=len(ev_period) - len(ev_prev) if len(ev_prev) else None)
+        rm2.metric("Room Guests", int(ev_period['party_size'].sum()), delta=int(ev_period['party_size'].sum()) - int(ev_prev['party_size'].sum()) if len(ev_prev) else None)
+        rm3.metric("Nights Sold", int(ev_period['nights'].sum()))
+        rev = ev_period['total_value'].sum()
+        rm4.metric("Room Revenue", f"£{rev:,.0f}" if rev > 0 else "—")
+
+        if len(ev_period) > 0 and 'venue_name' in ev_period.columns:
+            st.markdown("**By property**")
+            ev_by_prop = ev_period.groupby('venue_name').agg(
+                Stays=('party_size', 'count'),
+                Guests=('party_size', 'sum'),
+                Revenue=('total_value', 'sum'),
+            ).reset_index().sort_values('Stays', ascending=False)
+            ev_by_prop['Revenue'] = ev_by_prop['Revenue'].apply(lambda x: f"£{x:,.0f}" if x > 0 else '—')
+            ev_by_prop.columns = ['Property', 'Stays', 'Guests', 'Revenue']
+            st.dataframe(ev_by_prop, use_container_width=True, hide_index=True)
+
+        lines += [f"## Rooms Performance", f"Stays: {len(ev_period)}", f"Guests: {int(ev_period['party_size'].sum())}", ""]
+    else:
+        st.info("No room data loaded. Click Refresh Data in the sidebar.")
+
+    # --- GUEST FEEDBACK ---
+    st.markdown("---")
+    st.markdown("### ⭐ Guest Feedback")
+
+    mkt_fb_r = st.session_state.get('mkt_feedback', [])
+    if mkt_fb_r:
+        df_fb_r = pd.DataFrame(mkt_fb_r)
+        rating_col_r = next((c for c in ['overall', 'overall_rating', 'rating', 'stars'] if c in df_fb_r.columns), None)
+        if rating_col_r:
+            df_fb_r[rating_col_r] = pd.to_numeric(df_fb_r[rating_col_r], errors='coerce')
+            avg_r = df_fb_r[rating_col_r].mean()
+            low_r = int((df_fb_r[rating_col_r] < 3).sum())
+            five_r = int((df_fb_r[rating_col_r] == 5).sum())
+            fb1, fb2, fb3 = st.columns(3)
+            fb1.metric("Avg Rating", f"{avg_r:.2f}/5" if pd.notna(avg_r) else "—")
+            fb2.metric("5-Star Reviews", five_r)
+            fb3.metric("Low Ratings (<3★)", low_r)
+            lines += [f"## Guest Feedback", f"Avg rating: {avg_r:.2f}/5", f"5-star: {five_r}", f"Low ratings: {low_r}", ""]
+        else:
+            st.info("No rating data in loaded feedback.")
+    else:
+        st.info("Load Marketing Data to include feedback in this report.")
+
+    # --- UPCOMING HIGHLIGHTS ---
+    st.markdown("---")
+    st.markdown("### 🔮 Upcoming Highlights")
+
+    ops_res_r = st.session_state.get('reservations', [])
+    if ops_res_r:
+        df_ops_r = pd.DataFrame(ops_res_r)
+        if 'max_guests' in df_ops_r.columns:
+            df_ops_r['party_size'] = pd.to_numeric(df_ops_r['max_guests'], errors='coerce').fillna(0).astype(int)
+        if 'date' in df_ops_r.columns:
+            df_ops_r['res_date'] = pd.to_datetime(df_ops_r['date'], errors='coerce').dt.date
+        if 'status_display' in df_ops_r.columns:
+            df_ops_r = df_ops_r[df_ops_r['status_display'] != 'Canceled']
+
+        next_28_r = df_ops_r[
+            (df_ops_r['res_date'] >= date.today()) &
+            (df_ops_r['res_date'] <= date.today() + timedelta(days=28))
+        ]
+        functions_r = df_ops_r[
+            (df_ops_r['res_date'] >= date.today()) &
+            (df_ops_r['res_date'] <= date.today() + timedelta(days=14)) &
+            (df_ops_r['party_size'] >= 16)
+        ]
+
+        uh1, uh2 = st.columns(2)
+        uh1.metric("Covers booked — next 28 days", int(next_28_r['party_size'].sum()))
+        uh2.metric("Functions (16+) — next 14 days", len(functions_r))
+
+        if len(functions_r) > 0:
+            if 'venue_id' in functions_r.columns:
+                functions_r = functions_r.copy()
+                functions_r['venue_name'] = functions_r['venue_id'].map(venue_map).fillna('Unknown')
+            if 'first_name' in functions_r.columns:
+                functions_r = functions_r.copy()
+                functions_r['guest_name'] = (functions_r['first_name'].fillna('') + ' ' + functions_r['last_name'].fillna('')).str.strip()
+            func_display = functions_r[['res_date', 'venue_name', 'guest_name', 'party_size']].copy()
+            func_display.columns = ['Date', 'Pub', 'Guest', 'Party Size']
+            func_display = func_display.sort_values('Date')
+            st.markdown("**Upcoming functions:**")
+            st.dataframe(func_display, use_container_width=True, hide_index=True)
+            lines += [f"## Upcoming Functions (next 14 days)", f"{len(functions_r)} functions booked", ""]
+
+    # --- DOWNLOAD ---
+    st.markdown("---")
+    st.markdown("### Download Report")
+    dl_col1, dl_col2 = st.columns(2)
+
+    report_text = "\n".join(lines)
+    with dl_col1:
+        st.download_button(
+            label="⬇️ Download as Text",
+            data=report_text,
+            file_name=f"chickpea_{report_type.lower().replace(' ', '_')}_{date.today().strftime('%Y%m%d')}.txt",
+            mime="text/plain",
+        )
+
+    with dl_col2:
+        if st.button("Generate PDF", key="reports_pdf_btn"):
+            with st.spinner("Building PDF…"):
+                try:
+                    from reports_pdf import generate_summary_pdf
+
+                    # Safely gather computed values — fall back to 0/None if not in scope
+                    _cur_res     = cur_res     if 'cur_res'     in dir() else 0
+                    _cur_covers  = cur_covers  if 'cur_covers'  in dir() else 0
+                    _prev_res    = prev_res    if 'prev_res'    in dir() else 0
+                    _prev_covers = prev_covers if 'prev_covers' in dir() else 0
+                    _by_pub      = by_pub_r    if 'by_pub_r'    in dir() else None
+                    _top_pub     = top_pub     if 'top_pub'     in dir() else ""
+                    _bottom_pub  = bottom_pub  if 'bottom_pub'  in dir() else ""
+
+                    _room_stays      = len(ev_period)                  if 'ev_period' in dir() else 0
+                    _room_stays_prev = len(ev_prev)                    if 'ev_prev'   in dir() else 0
+                    _room_guests     = int(ev_period['party_size'].sum()) if 'ev_period' in dir() else 0
+                    _room_guests_prev= int(ev_prev['party_size'].sum())   if 'ev_prev'   in dir() else 0
+                    _room_nights     = int(ev_period['nights'].sum())     if 'ev_period' in dir() else 0
+                    _room_revenue    = ev_period['total_value'].sum()     if 'ev_period' in dir() else 0
+                    _rooms_by_prop   = ev_by_prop if 'ev_by_prop' in dir() else None
+
+                    _avg_r  = avg_r  if 'avg_r'  in dir() else None
+                    _five_r = five_r if 'five_r' in dir() else 0
+                    _low_r  = low_r  if 'low_r'  in dir() else 0
+
+                    _covers_28    = int(next_28_r['party_size'].sum()) if 'next_28_r'   in dir() else 0
+                    _functions_df = func_display if 'func_display' in dir() else None
+
+                    _period_label = period_label if 'period_label' in dir() else report_type
+                    _prev_label   = prev_label   if 'prev_label'   in dir() else "Prior period"
+
+                    pdf_bytes = generate_summary_pdf(
+                        report_title=report_title,
+                        period_label=_period_label,
+                        prev_label=_prev_label,
+                        cur_res=_cur_res, cur_covers=_cur_covers,
+                        prev_res=_prev_res, prev_covers=_prev_covers,
+                        by_pub_df=_by_pub, top_pub=_top_pub, bottom_pub=_bottom_pub,
+                        room_stays=_room_stays, room_stays_prev=_room_stays_prev,
+                        room_guests=_room_guests, room_guests_prev=_room_guests_prev,
+                        room_nights=_room_nights, room_revenue=_room_revenue,
+                        rooms_by_prop_df=_rooms_by_prop,
+                        avg_rating=_avg_r, five_star=_five_r, low_ratings=_low_r,
+                        covers_28=_covers_28, functions_df=_functions_df,
+                    )
+                    filename = f"chickpea_{report_type.lower().replace(' ', '_')}_{date.today().strftime('%Y%m%d')}.pdf"
+                    st.success("PDF ready.")
+                    st.download_button(
+                        label="Download PDF",
+                        data=pdf_bytes,
+                        file_name=filename,
+                        mime="application/pdf",
+                        type="primary",
+                        key="reports_pdf_dl",
+                    )
+                except Exception as e:
+                    st.error(f"PDF generation failed: {e}")
+
+    st.caption("Tip: load all data sources first (Refresh Data, Load Marketing Data, Load Sales Data) for a complete report.")
