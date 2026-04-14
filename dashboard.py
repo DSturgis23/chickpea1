@@ -1050,7 +1050,7 @@ with tab_operations:
                 if guest_email and res_email and guest_email.lower().strip() == res_email:
                     return row
                 if guest_phone and res_phone:
-                    norm = re.sub(r'\D', '', guest_phone)
+                    norm = re.sub(r'\D', '', str(guest_phone))
                     if norm and norm == res_phone:
                         return row
                 if guest_name and res_name and guest_name.lower().strip() == res_name:
