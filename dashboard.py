@@ -417,7 +417,9 @@ with tab_operations:
 
     # Venue filter - exclude group-level entries, add any known venues missing from API
     _known_venues = ["The Bell & Crown", "The Dog & Gun", "The Fleur de Lys",
-                     "The Grosvenor Arms", "The Manor House Inn", "The Pembroke Arms", "The Queen's Head"]
+                     "The Grosvenor Arms", "The Great Decoy", "The King's Arms",
+                     "The Manor House Inn", "The Pembroke Arms", "The Queen's Head",
+                     "The Silver Plough"]
     _api_names = [v['name'].strip() for v in venues if 'chickpea' not in v['name'].lower()]
     _all_names = sorted(set(_api_names) | set(_known_venues))
     venue_names = ["All Pubs"] + _all_names
@@ -429,7 +431,8 @@ with tab_operations:
                 st.caption(f"• {v.get('name', '—')}  `{v.get('id', '—')[:12]}…`")
             expected = ["The Bell & Crown", "The Dog & Gun", "The Fleur de Lys",
                         "The Grosvenor Arms", "The Manor House Inn", "The Pembroke Arms", "The Queen's Head"]
-            missing = [e for e in expected if not any(e.lower() in v.get('name','').lower() for v in venues)]
+            api_names_lower = [v.get('name', '').lower().replace('\u2019', "'") for v in venues]
+            missing = [e for e in expected if not any(e.lower().replace('\u2019', "'") in n for n in api_names_lower)]
             if missing:
                 st.warning("Not returned by API: " + ", ".join(missing))
         else:
