@@ -95,14 +95,12 @@ def load_data():
     eviivo_bookings = []
     eviivo_historical = []
     try:
-        if eviivo_client.authenticate():
+        if eviivo_client._ensure_authenticated():
             property_mappings = get_all_eviivo_properties()
             eviivo_bookings = eviivo_client.get_all_bookings(property_mappings, date.today())
-            eviivo_historical = eviivo_client.get_all_historical_bookings(
-                property_mappings,
-                checkin_from=datetime.now() - timedelta(days=365),
-                checkin_to=datetime.now() - timedelta(days=1),
-            )
+            hist_from_str = (datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d")
+            hist_to_str = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+            eviivo_historical = load_eviivo_bookings(eviivo_client, hist_from_str, hist_to_str)
             print(f"eviivo: {len(eviivo_bookings)} tonight, {len(eviivo_historical)} historical stays")
     except Exception as e:
         print(f"eviivo error: {e}")
