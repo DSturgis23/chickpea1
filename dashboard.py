@@ -1000,6 +1000,7 @@ with tab_operations:
             """Strip Booking.com boilerplate from eviivo notes."""
             if not note:
                 return ''
+            note = str(note)
             boilerplate = [
                 r'Non-Smoking.*', r'Breakfast is included.*', r'Children and Extra Bed.*',
                 r'Deposit Policy.*', r'Cancellation Policy.*', r'payment_on_Booking.*',
