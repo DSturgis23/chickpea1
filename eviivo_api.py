@@ -165,7 +165,10 @@ class EviivoClient:
             }
             try:
                 response = requests.get(url, headers=self._get_headers(), params=params, timeout=60)
-                response.raise_for_status()
+                if not response.ok:
+                    print(f"Eviivo HTTP {response.status_code} for {property_short_name} ({chunk_start.date()} – {chunk_end.date()}): {response.text[:200]}")
+                    chunk_start = chunk_end + timedelta(days=1)
+                    continue
                 bookings = response.json().get("Bookings", [])
                 all_bookings.extend([self._normalize_booking(b, property_short_name) for b in bookings])
             except requests.exceptions.RequestException as e:
@@ -180,6 +183,7 @@ class EviivoClient:
         for venue_name, property_short_name in property_mappings.items():
             if property_short_name:
                 bookings = self.get_bookings_range(property_short_name, checkin_from, checkin_to)
+                print(f"Eviivo [{property_short_name}]: {len(bookings)} bookings returned")
                 for booking in bookings:
                     booking['venue_name'] = venue_name.strip()
                 all_bookings.extend(bookings)
