@@ -415,8 +415,12 @@ with tab_operations:
     # Filters at top of Operations tab
     filter_col1, filter_col2, filter_col3, filter_col4, filter_col5 = st.columns([2, 2, 2, 2, 1])
 
-    # Venue filter - exclude group-level entries
-    venue_names = ["All Pubs"] + sorted([v['name'].strip() for v in venues if 'chickpea' not in v['name'].lower()])
+    # Venue filter - exclude group-level entries, add any known venues missing from API
+    _known_venues = ["The Bell & Crown", "The Dog & Gun", "The Fleur de Lys",
+                     "The Grosvenor Arms", "The Manor House Inn", "The Pembroke Arms", "The Queen's Head"]
+    _api_names = [v['name'].strip() for v in venues if 'chickpea' not in v['name'].lower()]
+    _all_names = sorted(set(_api_names) | set(_known_venues))
+    venue_names = ["All Pubs"] + _all_names
 
     # --- VENUE DIAGNOSTIC ---
     with st.sidebar.expander("🔍 Venues from API", expanded=False):
