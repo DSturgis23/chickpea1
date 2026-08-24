@@ -6,6 +6,7 @@ Handles OAuth authentication and booking data fetching from eviivo PMS
 import requests
 import os
 from datetime import datetime, timedelta
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
 def _get_credentials():
@@ -178,12 +179,27 @@ class EviivoClient:
         return all_bookings
 
     def get_all_historical_bookings(self, property_mappings, checkin_from, checkin_to):
-        """Fetch historical bookings across all properties within a check-in date range."""
+        """Fetch historical bookings across all properties within a check-in date range.
+        Properties are fetched in parallel (each is an independent HTTP round-trip to
+        eviivo) so the wall-clock time is bounded by the slowest property, not the sum."""
+        mapped = [(v, p) for v, p in property_mappings.items() if p]
         all_bookings = []
-        for venue_name, property_short_name in property_mappings.items():
-            if property_short_name:
-                bookings = self.get_bookings_range(property_short_name, checkin_from, checkin_to)
-                print(f"Eviivo [{property_short_name}]: {len(bookings)} bookings returned")
+        if not mapped:
+            return all_bookings
+
+        with ThreadPoolExecutor(max_workers=min(8, len(mapped))) as pool:
+            futures = {
+                pool.submit(self.get_bookings_range, property_short_name, checkin_from, checkin_to): venue_name
+                for venue_name, property_short_name in mapped
+            }
+            for future in as_completed(futures):
+                venue_name = futures[future]
+                try:
+                    bookings = future.result()
+                except Exception as e:
+                    print(f"Eviivo fetch failed for {venue_name}: {e}")
+                    continue
+                print(f"Eviivo [{venue_name}]: {len(bookings)} bookings returned")
                 for booking in bookings:
                     booking['venue_name'] = venue_name.strip()
                 all_bookings.extend(bookings)
@@ -191,7 +207,7 @@ class EviivoClient:
 
     def get_all_bookings(self, property_mappings, stay_date):
         """
-        Fetch bookings from all mapped properties for a given date
+        Fetch bookings from all mapped properties for a given date, in parallel.
 
         Args:
             property_mappings: dict mapping SevenRooms venue names to eviivo property shortnames
@@ -200,12 +216,23 @@ class EviivoClient:
         Returns:
             List of all normalized booking records across all properties
         """
+        mapped = [(v, p) for v, p in property_mappings.items() if p]
         all_bookings = []
+        if not mapped:
+            return all_bookings
 
-        for venue_name, property_short_name in property_mappings.items():
-            if property_short_name:  # Skip unmapped venues
-                bookings = self.get_bookings(property_short_name, stay_date)
-                # Add venue name to each booking for display
+        with ThreadPoolExecutor(max_workers=min(8, len(mapped))) as pool:
+            futures = {
+                pool.submit(self.get_bookings, property_short_name, stay_date): venue_name
+                for venue_name, property_short_name in mapped
+            }
+            for future in as_completed(futures):
+                venue_name = futures[future]
+                try:
+                    bookings = future.result()
+                except Exception as e:
+                    print(f"Eviivo fetch failed for {venue_name}: {e}")
+                    continue
                 for booking in bookings:
                     booking['venue_name'] = venue_name.strip()
                 all_bookings.extend(bookings)

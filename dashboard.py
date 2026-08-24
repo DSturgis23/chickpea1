@@ -526,20 +526,20 @@ with tab_operations:
     st.markdown("---")
 
     # === FETCH EVIIVO BOOKINGS FOR SELECTED DATE RANGE ===
-    # Reuse the cached "tonight" fetch when the range is just today; otherwise fetch by
-    # check-in range (widened backwards to catch guests already checked in) and keep only
-    # stays that actually overlap the selected range.
+    # Reuse the cached "tonight" fetch when the range is just today; otherwise go through
+    # the same cached helper Analytics uses (30 min TTL, per-property fetches run in
+    # parallel) so switching Pub/Show/Hide-cancelled doesn't re-hit the network for a date
+    # range already fetched this session — only an actual date change does.
     eviivo_for_range = []
     if date_from == today and date_to == today:
         eviivo_for_range = eviivo_bookings
     else:
-        try:
-            if eviivo_client._ensure_authenticated():
-                property_mappings = get_all_eviivo_properties()
-                fetch_from = date_from - timedelta(days=32)
-                eviivo_for_range = eviivo_client.get_all_historical_bookings(property_mappings, fetch_from, date_to)
-        except Exception as e:
-            print(f"eviivo fetch error for {date_from}–{date_to}: {e}")
+        fetch_from = date_from - timedelta(days=32)
+        eviivo_for_range = load_eviivo_bookings(
+            eviivo_client,
+            fetch_from.strftime("%Y-%m-%d"),
+            date_to.strftime("%Y-%m-%d"),
+        )
 
     # === APPLY FILTERS ===
     df_filtered = df_full.copy()
