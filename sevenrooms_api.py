@@ -162,17 +162,29 @@ class SevenRoomsClient:
         for key, info in self._tokens.items():
             venue_id = info["cred"].get("venue_id")
             if not venue_id:
-                # Legacy mode: try /venues endpoint
+                # Legacy mode: fetch /venues following cursor pagination
                 try:
-                    response = requests.get(
-                        f"{self.base_url}/venues",
-                        headers=self._get_headers(info["token"]),
-                        timeout=30,
-                    )
-                    response.raise_for_status()
-                    data = response.json()
-                    results = data.get("data", {}).get("results", [])
-                    venues.extend(results)
+                    all_venue_results = []
+                    cursor = None
+                    while True:
+                        params = {}
+                        if cursor:
+                            params["cursor"] = cursor
+                        response = requests.get(
+                            f"{self.base_url}/venues",
+                            headers=self._get_headers(info["token"]),
+                            params=params or None,
+                            timeout=30,
+                        )
+                        response.raise_for_status()
+                        data = response.json()
+                        page = data.get("data", {}).get("results", [])
+                        all_venue_results.extend(page)
+                        print(f"  venues page: {len(page)} results (total so far: {len(all_venue_results)})")
+                        cursor = data.get("data", {}).get("cursor")
+                        if not cursor:
+                            break
+                    venues.extend(all_venue_results)
                 except requests.exceptions.RequestException as e:
                     print(f"Failed to fetch venues list: {e}")
                 continue

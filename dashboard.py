@@ -296,83 +296,35 @@ if not reservations:
     st.info("Click **Refresh Data** in the sidebar to fetch reservations from SevenRooms.")
     st.stop()
 
-# Build DataFrame
-df = pd.DataFrame(reservations)
-
-# Map SevenRooms fields
-if 'first_name' in df.columns:
-    df['guest_name'] = (df['first_name'].fillna('') + ' ' + df['last_name'].fillna('')).str.strip()
-if 'max_guests' in df.columns:
-    df['party_size'] = pd.to_numeric(df['max_guests'], errors='coerce').fillna(0).astype(int)
-if 'table_numbers' in df.columns:
-    df['table'] = df['table_numbers'].apply(lambda x: ', '.join(x) if isinstance(x, list) and len(x) > 0 else '-')
-if 'time_slot_iso' in df.columns:
-    df['time'] = pd.to_datetime(df['time_slot_iso'], errors='coerce').dt.strftime('%H:%M')
-if 'phone_number' in df.columns:
-    df['phone'] = df['phone_number']
-if 'venue_seating_area_name' in df.columns:
-    df['seating_area'] = df['venue_seating_area_name'].fillna('-')
-if 'reservation_type' in df.columns:
-    df['occasion'] = df['reservation_type'].fillna('')
-if 'status_display' in df.columns:
-    df['status'] = df['status_display'].fillna('Unknown')
-if 'shift_category' in df.columns:
-    def map_meal_period(row):
-        shift = str(row.get('shift_category', '')).upper()
-        if shift == 'BREAKFAST':
-            return 'Breakfast'
-        elif shift == 'LUNCH':
-            return 'Lunch'
-        elif shift == 'DINNER':
-            return 'Dinner'
-        else:
-            # For 'DAY' or anything else, determine from the parsed HH:MM time
-            time_str = str(row.get('time', '') or '')
-            if not time_str or time_str == 'nan':
-                # Fall back to parsing time_slot_iso directly
-                iso = str(row.get('time_slot_iso', '') or '')
-                try:
-                    time_str = pd.to_datetime(iso).strftime('%H:%M')
-                except Exception:
-                    time_str = ''
-            if time_str and len(time_str) >= 2:
-                try:
-                    hour = int(time_str[:2])
-                    return 'Lunch' if hour < 15 else 'Dinner'
-                except Exception:
-                    pass
-            return 'Other'
-    df['meal_period'] = df.apply(map_meal_period, axis=1)
-
-# Combine notes
-df['all_notes'] = df.apply(lambda r: ' | '.join(filter(None, [str(r.get('notes') or ''), str(r.get('client_requests') or '')])), axis=1)
-
-# Parse date
-if 'date' in df.columns:
-    df['reservation_date'] = pd.to_datetime(df['date'], errors='coerce').dt.date
-
 # Map venue names
 venue_map = {v['id']: v['name'].strip() for v in venues}
-if 'venue_id' in df.columns:
-    df['venue_name'] = df['venue_id'].map(venue_map).fillna('Unknown')
 
-# === PROCESS HISTORICAL DATA ===
-df_hist = pd.DataFrame(historical) if historical else pd.DataFrame()
+def process_reservations_df(records, venue_map):
+    """Apply the standard SevenRooms field mapping to a list of raw reservation records.
+    Used for both the upcoming (df) and historical (df_hist) datasets so that guest-level
+    fields (name, table, notes, occasion, loyalty, etc.) are available for any date range."""
+    d = pd.DataFrame(records) if records else pd.DataFrame()
+    if len(d) == 0:
+        return d
 
-if len(df_hist) > 0:
-    # Apply same transformations as main df
-    if 'max_guests' in df_hist.columns:
-        df_hist['party_size'] = pd.to_numeric(df_hist['max_guests'], errors='coerce').fillna(0).astype(int)
-    if 'date' in df_hist.columns:
-        df_hist['reservation_date'] = pd.to_datetime(df_hist['date'], errors='coerce').dt.date
-    if 'venue_id' in df_hist.columns:
-        df_hist['venue_name'] = df_hist['venue_id'].map(venue_map).fillna('Unknown')
-    if 'status_display' in df_hist.columns:
-        df_hist['status'] = df_hist['status_display'].fillna('Unknown')
-    if 'shift_category' in df_hist.columns:
-        if 'time_slot_iso' in df_hist.columns:
-            df_hist['time'] = pd.to_datetime(df_hist['time_slot_iso'], errors='coerce').dt.strftime('%H:%M')
-        def map_meal_period_hist(row):
+    if 'first_name' in d.columns:
+        d['guest_name'] = (d['first_name'].fillna('') + ' ' + d['last_name'].fillna('')).str.strip()
+    if 'max_guests' in d.columns:
+        d['party_size'] = pd.to_numeric(d['max_guests'], errors='coerce').fillna(0).astype(int)
+    if 'table_numbers' in d.columns:
+        d['table'] = d['table_numbers'].apply(lambda x: ', '.join(x) if isinstance(x, list) and len(x) > 0 else '-')
+    if 'time_slot_iso' in d.columns:
+        d['time'] = pd.to_datetime(d['time_slot_iso'], errors='coerce').dt.strftime('%H:%M')
+    if 'phone_number' in d.columns:
+        d['phone'] = d['phone_number']
+    if 'venue_seating_area_name' in d.columns:
+        d['seating_area'] = d['venue_seating_area_name'].fillna('-')
+    if 'reservation_type' in d.columns:
+        d['occasion'] = d['reservation_type'].fillna('')
+    if 'status_display' in d.columns:
+        d['status'] = d['status_display'].fillna('Unknown')
+    if 'shift_category' in d.columns:
+        def map_meal_period(row):
             shift = str(row.get('shift_category', '')).upper()
             if shift == 'BREAKFAST':
                 return 'Breakfast'
@@ -381,8 +333,10 @@ if len(df_hist) > 0:
             elif shift == 'DINNER':
                 return 'Dinner'
             else:
+                # For 'DAY' or anything else, determine from the parsed HH:MM time
                 time_str = str(row.get('time', '') or '')
                 if not time_str or time_str == 'nan':
+                    # Fall back to parsing time_slot_iso directly
                     iso = str(row.get('time_slot_iso', '') or '')
                     try:
                         time_str = pd.to_datetime(iso).strftime('%H:%M')
@@ -395,7 +349,88 @@ if len(df_hist) > 0:
                     except Exception:
                         pass
                 return 'Other'
-        df_hist['meal_period'] = df_hist.apply(map_meal_period_hist, axis=1)
+        d['meal_period'] = d.apply(map_meal_period, axis=1)
+
+    # Combine notes
+    d['all_notes'] = d.apply(lambda r: ' | '.join(filter(None, [str(r.get('notes') or ''), str(r.get('client_requests') or '')])), axis=1)
+
+    # Parse date
+    if 'date' in d.columns:
+        d['reservation_date'] = pd.to_datetime(d['date'], errors='coerce').dt.date
+
+    # Map venue names
+    if 'venue_id' in d.columns:
+        d['venue_name'] = d['venue_id'].map(venue_map).fillna('Unknown')
+
+    # === EXTRACT LOYALTY & VISIT COUNT FROM SEVENROOMS ===
+    # SevenRooms embeds guest profile data in a nested 'client' dict on each reservation.
+    # Pull loyalty_tier, loyalty_id, and visit_count from there (fallback to top-level fields).
+    def _extract_loyalty(row):
+        client = row.get('client') or {}
+        if not isinstance(client, dict):
+            client = {}
+        tier = row.get('loyalty_tier') or client.get('loyalty_tier') or client.get('loyalty') or ''
+        lid  = row.get('loyalty_id')  or client.get('loyalty_id')  or ''
+        vc   = (row.get('visit_count') or client.get('visit_count') or
+                client.get('total_visits') or client.get('num_visits') or 0)
+        return pd.Series({'loyalty_tier': str(tier).strip(), 'loyalty_id': str(lid).strip(),
+                          'visit_count_api': int(vc) if str(vc).isdigit() else 0})
+
+    _loyalty_cols = d.apply(_extract_loyalty, axis=1)
+    d['loyalty_tier']  = _loyalty_cols['loyalty_tier']
+    d['loyalty_id']    = _loyalty_cols['loyalty_id']
+    d['visit_count_api'] = _loyalty_cols['visit_count_api']
+
+    return d
+
+# Build DataFrames — same field mapping applied to both the upcoming window (df) and the
+# historical window (df_hist) so guest-level detail is available for any selected date range.
+df = process_reservations_df(reservations, venue_map)
+df_hist = process_reservations_df(historical, venue_map)
+
+# === CALCULATE VISIT COUNT FROM HISTORICAL DATA ===
+# Count visits in the last 365 days only (even though we load 400 days for YoY comparisons).
+# This is the reliable source when SevenRooms' loyalty scheme isn't configured.
+if len(df) > 0 and len(df_hist) > 0:
+    _365_cutoff = (datetime.now() - timedelta(days=365)).date()
+    # Only count confirmed/arrived reservations within the last 365 days
+    _hist_ok = df_hist
+    if 'reservation_date' in df_hist.columns:
+        _hist_ok = _hist_ok[_hist_ok['reservation_date'] >= _365_cutoff]
+    if 'status' in _hist_ok.columns:
+        _hist_ok = _hist_ok[~_hist_ok['status'].str.lower().str.contains('cancel|no.show|no-show', na=False)]
+
+    _email_counts: dict = {}
+    _name_counts: dict  = {}
+
+    if 'email' in _hist_ok.columns:
+        _ec = _hist_ok[_hist_ok['email'].notna() & (_hist_ok['email'] != '')].copy()
+        _ec['_email_norm'] = _ec['email'].str.lower().str.strip()
+        _email_counts = _ec.groupby('_email_norm').size().to_dict()
+
+    if 'first_name' in _hist_ok.columns and 'last_name' in _hist_ok.columns:
+        _nc = _hist_ok.copy()
+        _nc['_name_norm'] = (_nc['first_name'].fillna('') + ' ' + _nc['last_name'].fillna('')).str.lower().str.strip()
+        _name_counts = _nc[_nc['_name_norm'].str.len() > 1].groupby('_name_norm').size().to_dict()
+
+    def _hist_visit_count(row):
+        email_norm = str(row.get('email', '') or '').lower().strip()
+        name_norm  = (str(row.get('first_name', '') or '') + ' ' + str(row.get('last_name', '') or '')).lower().strip()
+        return max(_email_counts.get(email_norm, 0), _name_counts.get(name_norm, 0))
+
+    _hist_vc = df.apply(_hist_visit_count, axis=1)
+    # Use whichever is higher: API-reported count or our own historical count
+    df['visit_count'] = df['visit_count_api'].combine(_hist_vc, max)
+    # Also populate on df_hist itself so the "Loyal members" fallback still works when the
+    # Operations date range picker is set to a wholly historical period.
+    df_hist['visit_count'] = df_hist['visit_count_api'].combine(df_hist.apply(_hist_visit_count, axis=1), max)
+elif len(df) > 0:
+    df['visit_count'] = df['visit_count_api']
+
+# Combined dataset spanning both the upcoming window (df: today → +90 days) and the
+# historical window (df_hist: -400 days → yesterday) — lets the Operations date range
+# picker select any date, past or future, from one consistent frame.
+df_full = pd.concat([df, df_hist], ignore_index=True) if len(df_hist) > 0 else df.copy()
 
 # Helper function for formatting differences
 def format_diff(current, last_week):
@@ -409,6 +444,15 @@ def format_diff(current, last_week):
         return f"{current} ({diff})"
     else:
         return f"{current} (=)"
+
+def format_date_range(d_from, d_to):
+    """Human-friendly label for a single date or a date range."""
+    if d_from == d_to:
+        return d_from.strftime('%A %d/%m/%Y')
+    same_year = d_from.year == d_to.year
+    from_str = d_from.strftime('%a %d %b') if same_year else d_from.strftime('%a %d %b %Y')
+    to_str = d_to.strftime('%a %d %b %Y')
+    return f"{from_str} – {to_str}"
 
 # === OPERATIONS TAB ===
 with tab_operations:
@@ -440,28 +484,34 @@ with tab_operations:
     with filter_col1:
         selected_venue = st.selectbox("Pub", venue_names, key="ops_venue")
 
-    # Date filter - future dates only
+    # Date range filter - historic and future, bounded by what's actually fetched
+    # (df_hist covers -400 days, df covers +90 days — see load_data()).
     today = date.today()
-    future_dates = []
-    if 'reservation_date' in df.columns:
-        future_dates = [d for d in df['reservation_date'].dropna().unique() if d >= today]
-        future_dates = sorted(future_dates)
+    _min_selectable = today - timedelta(days=400)
+    _max_selectable = today + timedelta(days=90)
 
     with filter_col2:
-        if future_dates:
-            max_date = max(future_dates)
-            default_date = today if today in future_dates else future_dates[0]
-            selected_date = st.date_input(
-                "Date",
-                value=default_date,
-                min_value=today,
-                max_value=max_date,
-                format="DD/MM/YYYY",
-                key="ops_date"
-            )
+        _date_range = st.date_input(
+            "Date range",
+            value=(today, today),
+            min_value=_min_selectable,
+            max_value=_max_selectable,
+            format="DD/MM/YYYY",
+            key="ops_date_range"
+        )
+        if isinstance(_date_range, (tuple, list)):
+            if len(_date_range) == 2:
+                date_from, date_to = _date_range
+            elif len(_date_range) == 1:
+                date_from = date_to = _date_range[0]
+            else:
+                date_from, date_to = today, today
         else:
-            selected_date = today
-            st.warning("No future reservations found")
+            date_from = date_to = _date_range
+        if date_to < date_from:
+            date_from, date_to = date_to, date_from
+    is_range = date_to > date_from
+    range_days = (date_to - date_from).days + 1
 
     with filter_col3:
         source_options = ["All", "Reservations", "Room Stays"]
@@ -475,38 +525,36 @@ with tab_operations:
 
     st.markdown("---")
 
-    # === FETCH EVIIVO BOOKINGS FOR SELECTED DATE ===
-    # Fetch eviivo bookings for the selected date (if different from today)
-    eviivo_for_date = []
-    if selected_date == today:
-        eviivo_for_date = eviivo_bookings
+    # === FETCH EVIIVO BOOKINGS FOR SELECTED DATE RANGE ===
+    # Reuse the cached "tonight" fetch when the range is just today; otherwise fetch by
+    # check-in range (widened backwards to catch guests already checked in) and keep only
+    # stays that actually overlap the selected range.
+    eviivo_for_range = []
+    if date_from == today and date_to == today:
+        eviivo_for_range = eviivo_bookings
     else:
-        # Fetch eviivo bookings for the selected date
         try:
             if eviivo_client._ensure_authenticated():
                 property_mappings = get_all_eviivo_properties()
-                eviivo_for_date = eviivo_client.get_all_bookings(property_mappings, selected_date)
+                fetch_from = date_from - timedelta(days=32)
+                eviivo_for_range = eviivo_client.get_all_historical_bookings(property_mappings, fetch_from, date_to)
         except Exception as e:
-            print(f"eviivo fetch error for {selected_date}: {e}")
+            print(f"eviivo fetch error for {date_from}–{date_to}: {e}")
 
     # === APPLY FILTERS ===
-    df_filtered = df.copy()
+    df_filtered = df_full.copy()
 
     # Filter out cancelled bookings if checkbox is checked
     if hide_cancelled and 'status' in df_filtered.columns:
         df_filtered = df_filtered[df_filtered['status'] != 'Canceled']
 
-    # Filter to future dates only
-    if 'reservation_date' in df_filtered.columns:
-        df_filtered = df_filtered[df_filtered['reservation_date'] >= today]
-
     # Filter by venue
     if selected_venue != "All Pubs" and 'venue_name' in df_filtered.columns:
         df_filtered = df_filtered[df_filtered['venue_name'] == selected_venue]
 
-    # Filter by date - ensure types match
+    # Filter by date range - ensure types match
     if 'reservation_date' in df_filtered.columns:
-        df_filtered = df_filtered[df_filtered['reservation_date'] == selected_date]
+        df_filtered = df_filtered[(df_filtered['reservation_date'] >= date_from) & (df_filtered['reservation_date'] <= date_to)]
 
     # Add source/type columns for SevenRooms reservations
     df_filtered['source'] = 'sevenrooms'
@@ -515,11 +563,13 @@ with tab_operations:
 
     # === CREATE EVIIVO DATAFRAME ===
     df_eviivo = pd.DataFrame()
-    if eviivo_for_date:
-        df_eviivo = pd.DataFrame(eviivo_for_date)
-        # Only show guests actually staying tonight (checkout must be after selected date)
-        if 'checkout_date' in df_eviivo.columns:
-            df_eviivo = df_eviivo[pd.to_datetime(df_eviivo['checkout_date'], errors='coerce') > pd.Timestamp(selected_date)]
+    if eviivo_for_range:
+        df_eviivo = pd.DataFrame(eviivo_for_range)
+        # Only show stays that overlap the selected range (checked in by end, checking out after start)
+        if 'checkout_date' in df_eviivo.columns and 'date' in df_eviivo.columns:
+            _checkin = pd.to_datetime(df_eviivo['date'], errors='coerce')
+            _checkout = pd.to_datetime(df_eviivo['checkout_date'], errors='coerce')
+            df_eviivo = df_eviivo[(_checkout > pd.Timestamp(date_from)) & (_checkin <= pd.Timestamp(date_to))]
         # Filter by venue if selected
         if selected_venue != "All Pubs" and 'venue_name' in df_eviivo.columns:
             df_eviivo = df_eviivo[df_eviivo['venue_name'] == selected_venue]
@@ -533,22 +583,32 @@ with tab_operations:
     elif selected_source == "Room Stays":
         df_filtered = pd.DataFrame()  # Clear SevenRooms data
 
-    # Calculate comparison dates
-    last_week_date = selected_date - timedelta(days=7)
-    last_year_date = selected_date - timedelta(weeks=52)  # Same weekday last year
+    # Calculate comparison periods - shifted by the same span as the selected range
+    last_week_from = date_from - timedelta(days=7)
+    last_week_to = date_to - timedelta(days=7)
+    last_year_from = date_from - timedelta(weeks=52)  # Same weekday(s) last year
+    last_year_to = date_to - timedelta(weeks=52)
 
-    def _filter_hist(target_date):
-        if len(df_hist) == 0 or 'reservation_date' not in df_hist.columns:
+    def _filter_hist(d_from, d_to):
+        if len(df_full) == 0 or 'reservation_date' not in df_full.columns:
             return pd.DataFrame()
-        df_out = df_hist[df_hist['reservation_date'] == target_date].copy()
+        df_out = df_full[(df_full['reservation_date'] >= d_from) & (df_full['reservation_date'] <= d_to)].copy()
         if hide_cancelled and 'status' in df_out.columns:
             df_out = df_out[df_out['status'] != 'Canceled']
         if selected_venue != "All Pubs" and 'venue_name' in df_out.columns:
             df_out = df_out[df_out['venue_name'] == selected_venue]
         return df_out
 
-    df_last_week = _filter_hist(last_week_date)
-    df_last_year = _filter_hist(last_year_date)
+    df_last_week = _filter_hist(last_week_from, last_week_to)
+    df_last_year = _filter_hist(last_year_from, last_year_to)
+
+    # Label for the "last week" comparison column/caption
+    if is_range:
+        lw_tag = "Prev Period"
+        lw_date_str = f"{last_week_from.strftime('%d/%m')}–{last_week_to.strftime('%d/%m')}"
+    else:
+        lw_tag = "LW"
+        lw_date_str = last_week_from.strftime('%d/%m')
 
     # Calculate meal period breakdown
     total_res = len(df_filtered)
@@ -562,7 +622,7 @@ with tab_operations:
     lw_total_res = len(df_last_week) if len(df_last_week) > 0 else 0
     lw_total_covers = int(df_last_week['party_size'].sum()) if len(df_last_week) > 0 and 'party_size' in df_last_week.columns else 0
 
-    st.subheader(f"Overview - {selected_date.strftime('%A %d/%m/%Y')}")
+    st.subheader(f"Overview - {format_date_range(date_from, date_to)}")
     if selected_venue != "All Pubs":
         st.caption(f"Showing: {selected_venue}")
 
@@ -598,22 +658,22 @@ with tab_operations:
                 'Period': period,
                 'Res': current_res,
                 'Covers': current_covers,
-                f'LW Res ({last_week_date.strftime("%d/%m")})': lw_res,
-                f'LW Covers': lw_covers,
+                f'{lw_tag} Res ({lw_date_str})': lw_res,
+                f'{lw_tag} Covers': lw_covers,
             })
 
         total_row = {
             'Period': 'TOTAL',
             'Res': total_res,
             'Covers': total_covers,
-            f'LW Res ({last_week_date.strftime("%d/%m")})': lw_total_res if lw_total_res > 0 else '-',
-            f'LW Covers': lw_total_covers if lw_total_covers > 0 else '-',
+            f'{lw_tag} Res ({lw_date_str})': lw_total_res if lw_total_res > 0 else '-',
+            f'{lw_tag} Covers': lw_total_covers if lw_total_covers > 0 else '-',
         }
         meal_stats.insert(0, total_row)
 
         meal_df = pd.DataFrame(meal_stats)
         st.dataframe(meal_df, use_container_width=True, hide_index=True)
-        st.caption(f"LW = {last_week_date.strftime('%A %d/%m/%Y')}")
+        st.caption(f"{lw_tag} = {format_date_range(last_week_from, last_week_to)}")
     else:
         col1, col2, col3, col4 = st.columns(4)
         with col1:
@@ -621,9 +681,9 @@ with tab_operations:
         with col2:
             st.metric("Covers", total_covers)
         with col3:
-            st.metric(f"LW Res ({last_week_date.strftime('%d/%m')})", lw_total_res if lw_total_res > 0 else '-')
+            st.metric(f"{lw_tag} Res ({lw_date_str})", lw_total_res if lw_total_res > 0 else '-')
         with col4:
-            st.metric(f"LW Covers ({last_week_date.strftime('%d/%m')})", lw_total_covers if lw_total_covers > 0 else '-')
+            st.metric(f"{lw_tag} Covers ({lw_date_str})", lw_total_covers if lw_total_covers > 0 else '-')
 
     # Notes count
     if 'all_notes' in df_filtered.columns:
@@ -633,15 +693,15 @@ with tab_operations:
 
     # === HELPER FUNCTIONS FOR DISPLAY SECTIONS ===
     def show_upcoming_functions():
-        """Show bookings of 16+ covers across the next 7 days."""
-        if 'reservation_date' not in df.columns or 'party_size' not in df.columns:
+        """Show bookings of 16+ covers across the selected range, plus the following 7 days."""
+        if 'reservation_date' not in df_full.columns or 'party_size' not in df_full.columns:
             return
 
-        cutoff = selected_date + timedelta(days=7)
-        df_funcs = df[
-            (df['reservation_date'] >= selected_date) &
-            (df['reservation_date'] <= cutoff) &
-            (df['party_size'] >= 16)
+        cutoff = date_to + timedelta(days=7)
+        df_funcs = df_full[
+            (df_full['reservation_date'] >= date_from) &
+            (df_full['reservation_date'] <= cutoff) &
+            (df_full['party_size'] >= 16)
         ].copy()
 
         if 'status' in df_funcs.columns:
@@ -653,8 +713,8 @@ with tab_operations:
         if len(df_funcs) == 0:
             return
 
-        st.subheader("🎉 Upcoming Functions (next 7 days)")
-        st.caption("Bookings of 16 or more covers")
+        st.subheader("🎉 Upcoming Functions")
+        st.caption(f"Bookings of 16 or more covers, {format_date_range(date_from, cutoff)}")
 
         df_funcs = df_funcs.sort_values(['reservation_date', 'time'] if 'time' in df_funcs.columns else ['reservation_date'])
 
@@ -693,8 +753,10 @@ with tab_operations:
         # Add SevenRooms reservations
         if len(df_filtered) > 0:
             for _, row in df_filtered.iterrows():
+                _res_date = row.get('reservation_date', '')
                 combined_rows.append({
                     'Type': 'R',
+                    'Date': _res_date.strftime('%Y-%m-%d') if hasattr(_res_date, 'strftime') else str(_res_date),
                     'Pub': row.get('venue_name', '-'),
                     'Time': row.get('time', '-'),
                     'Guest': row.get('guest_name', '-'),
@@ -710,6 +772,7 @@ with tab_operations:
             for _, row in df_eviivo.iterrows():
                 combined_rows.append({
                     'Type': 'A',
+                    'Date': str(row.get('date', '') or ''),
                     'Pub': row.get('venue_name', '-'),
                     'Time': row.get('time', '14:00'),
                     'Guest': row.get('guest_name', '-'),
@@ -722,15 +785,17 @@ with tab_operations:
 
         if combined_rows:
             df_combined = pd.DataFrame(combined_rows)
-            # Sort by time
-            df_combined = df_combined.sort_values('Time')
+            # Sort by date then time (Date column only shown when the range spans multiple days)
+            df_combined = df_combined.sort_values(['Date', 'Time'])
 
             # Display columns (hide source column from display)
-            display_cols = ['Type', 'Pub', 'Time', 'Guest', 'Size', 'Detail', 'Notes', 'Phone']
+            display_cols = ['Date', 'Type', 'Pub', 'Time', 'Guest', 'Size', 'Detail', 'Notes', 'Phone'] if is_range else \
+                ['Type', 'Pub', 'Time', 'Guest', 'Size', 'Detail', 'Notes', 'Phone']
             st.dataframe(df_combined[display_cols], use_container_width=True, hide_index=True)
 
             csv = df_combined[display_cols].to_csv(index=False)
-            filename = f"activity_{selected_date}.csv" if selected_source == "All" else f"{'reservations' if selected_source == 'Reservations' else 'rooms'}_{selected_date}.csv"
+            date_tag = f"{date_from}_to_{date_to}" if is_range else f"{date_from}"
+            filename = f"activity_{date_tag}.csv" if selected_source == "All" else f"{'reservations' if selected_source == 'Reservations' else 'rooms'}_{date_tag}.csv"
             st.download_button("Download CSV", csv, filename, "text/csv")
 
             # Legend
@@ -881,19 +946,30 @@ with tab_operations:
                     )
 
     def show_service_briefing():
-        """Daily service briefing paragraph for manager to read to staff."""
-        st.subheader(f"📋 Today's Briefing — {selected_venue}")
-        st.caption(selected_date.strftime('%A %d %B %Y'))
+        """Service briefing for the manager to read to staff — a daily paragraph for a single
+        date, or rolled up into a period briefing when a multi-day range is selected."""
+        briefing_label = "Today's Briefing" if not is_range else "Briefing"
+        st.subheader(f"📋 {briefing_label} — {selected_venue}")
+        st.caption(format_date_range(date_from, date_to))
 
         if total_res == 0 and total_rooms == 0:
-            st.info("No bookings for this date.")
+            st.info("No bookings for this period.")
             st.markdown("---")
             return
 
         dietary_keywords = ['allerg', 'intoleran', 'gluten', 'vegan', 'vegetarian', 'dairy', 'nut', 'celiac', 'halal', 'kosher', 'pescatarian']
-        vc_col = next((c for c in ['visit_count', 'total_visits', 'visits'] if c in df_filtered.columns), None)
+        _sort_cols = ['reservation_date', 'time'] if is_range else ['time']
 
-        # Build guest -> last visit lookup from historical data (excluding today)
+        def _when(row):
+            """Guest-mention timestamp — just the time for a single day, date + time across a range."""
+            t = row.get('time', '?')
+            if not is_range:
+                return t
+            d = row.get('reservation_date', '')
+            d_str = d.strftime('%a %d/%m') if hasattr(d, 'strftime') else str(d)
+            return f"{d_str} {t}"
+
+        # Build guest -> last visit lookup from historical data (excluding the selected period)
         guest_last_visit = {}
         if len(df_hist) > 0:
             hist_past = df_hist.copy()
@@ -903,22 +979,32 @@ with tab_operations:
                 hist_past = hist_past[hist_past['_name'].str.len() > 0]
                 for name, grp in hist_past.groupby('_name'):
                     last = grp['reservation_date'].max()
-                    if last < date.today():
+                    if last < date_from:
                         guest_last_visit[name] = last
 
         # 1. OPENING PARAGRAPH
         sentences = []
 
-        # Reservations + last week comparison
+        # Reservations + comparison to the same period last week
         lw_covers = int(df_last_week['party_size'].sum()) if len(df_last_week) > 0 and 'party_size' in df_last_week.columns else None
         if lw_covers is not None:
             diff = total_covers - lw_covers
-            diff_str = f", up {diff} on last week" if diff > 0 else (f", down {abs(diff)} on last week" if diff < 0 else ", same as last week")
+            comparison = "the same period last week" if is_range else "last week"
+            if diff > 0:
+                diff_str = f", up {diff} on {comparison}"
+            elif diff < 0:
+                diff_str = f", down {abs(diff)} on {comparison}"
+            else:
+                diff_str = f", same as {comparison}"
         else:
             diff_str = ""
-        sentences.append(f"You have {total_res} reservation{'s' if total_res != 1 else ''} today for {total_covers} covers{diff_str}.")
 
-        # Busiest service + peaking time
+        if is_range:
+            sentences.append(f"You have {total_res} reservation{'s' if total_res != 1 else ''} over {format_date_range(date_from, date_to)} ({range_days} days) for {total_covers} covers{diff_str}.")
+        else:
+            sentences.append(f"You have {total_res} reservation{'s' if total_res != 1 else ''} today for {total_covers} covers{diff_str}.")
+
+        # Busiest service + peaking time (aggregated across the whole period)
         if 'meal_period' in df_filtered.columns and 'party_size' in df_filtered.columns and 'time' in df_filtered.columns:
             period_stats = {}
             for period in ['Breakfast', 'Lunch', 'Dinner']:
@@ -938,27 +1024,34 @@ with tab_operations:
                     if period != busiest:
                         sentences.append(f"{period} has {covers} covers across {count} bookings.")
 
+        # Busiest day (range only)
+        if is_range and 'reservation_date' in df_filtered.columns and 'party_size' in df_filtered.columns and total_res > 0:
+            day_covers = df_filtered.groupby('reservation_date')['party_size'].sum()
+            if len(day_covers) > 0:
+                busiest_day = day_covers.idxmax()
+                bd_str = busiest_day.strftime('%A %d/%m') if hasattr(busiest_day, 'strftime') else str(busiest_day)
+                sentences.append(f"{bd_str} is your busiest day with {int(day_covers.max())} covers.")
+
         opening = " ".join(sentences)
-        st.markdown(f"**Service Briefing - {selected_venue}, {selected_date.strftime('%A %d/%m/%Y')}**")
+        st.markdown(f"**Service Briefing - {selected_venue}, {format_date_range(date_from, date_to)}**")
         st.markdown(opening)
 
         # 2. SPECIAL OCCASIONS — all reservation_type values, as flowing sentence
         if 'occasion' in df_filtered.columns:
-            occ_df = df_filtered[df_filtered['occasion'].str.len() > 0].sort_values('time')
+            occ_df = df_filtered[df_filtered['occasion'].str.len() > 0].sort_values(_sort_cols)
             if len(occ_df) > 0:
                 occ_parts = []
                 for _, row in occ_df.iterrows():
-                    occ_parts.append(f"{row.get('occasion', '')} for the {row.get('guest_name', 'Guest')} party at {row.get('time', '?')}.")
+                    occ_parts.append(f"{row.get('occasion', '')} for the {row.get('guest_name', 'Guest')} party at {_when(row)}.")
                 st.markdown(f"**Special occasions:** {' '.join(occ_parts)}")
 
         # 3. ALLERGIES & DIETARY REQUIREMENTS
         allergy_parts = []
-        for _, row in df_filtered.sort_values('time').iterrows():
+        for _, row in df_filtered.sort_values(_sort_cols).iterrows():
             notes_text = str(row.get('all_notes', '') or '').lower()
             occasion_text = str(row.get('occasion', '') or '').lower()
             if any(k in notes_text for k in dietary_keywords) or any(k in occasion_text for k in dietary_keywords):
                 name = row.get('guest_name', 'Guest')
-                time = row.get('time', '?')
                 size = row.get('party_size', '?')
                 # Use whichever field has the dietary info
                 detail = str(row.get('all_notes', '') or row.get('occasion', '') or '')
@@ -966,32 +1059,40 @@ with tab_operations:
                 import re
                 detail = re.sub(r'^Booking Notes:\s*', '', detail, flags=re.IGNORECASE).strip()
                 detail = re.sub(r'^Custom question response:\s*', '', detail, flags=re.IGNORECASE).strip()
-                allergy_parts.append(f"{name} ({time}, party of {size}) — {detail}")
+                allergy_parts.append(f"{name} ({_when(row)}, party of {size}) — {detail}")
         if allergy_parts:
             st.markdown(f"**Allergies & dietary requirements** (please brief the kitchen): {'; '.join(allergy_parts)}.")
 
-        # 4. WELCOME BACK — guests not seen in 90+ days
+        # 4. WELCOME BACK — guests not seen in 90+ days (measured to their reservation date)
         if guest_last_visit:
             welcome_parts = []
-            for _, row in df_filtered.sort_values('time').iterrows():
+            for _, row in df_filtered.sort_values(_sort_cols).iterrows():
                 name_key = str(row.get('guest_name', '')).strip().lower()
                 if name_key and name_key in guest_last_visit:
                     last = guest_last_visit[name_key]
-                    days_away = (date.today() - last).days
+                    res_date = row.get('reservation_date')
+                    anchor = res_date if hasattr(res_date, 'toordinal') else date_from
+                    days_away = (anchor - last).days
                     if days_away >= 90:
-                        welcome_parts.append(f"{row.get('guest_name', 'Guest')} ({row.get('time', '?')}) is back after {days_away} days.")
+                        welcome_parts.append(f"{row.get('guest_name', 'Guest')} ({_when(row)}) is back after {days_away} days.")
             if welcome_parts:
                 st.markdown(f"**Welcome back:** {' '.join(welcome_parts)} Great to see them again!")
 
-        # 5. LOYAL MEMBERS
+        # 5. LOYAL MEMBERS — prefer SevenRooms loyalty_tier; fall back to visit count from history
         loyal_parts = []
-        if 'loyalty_tier' in df_filtered.columns:
-            for _, row in df_filtered[df_filtered['loyalty_tier'].notna() & (df_filtered['loyalty_tier'] != '')].sort_values('time').iterrows():
-                loyal_parts.append(f"{row.get('guest_name', 'Guest')} ({row.get('time', '?')}, {row.get('loyalty_tier', '')})")
-        elif vc_col:
-            for _, row in df_filtered[pd.to_numeric(df_filtered[vc_col], errors='coerce').fillna(0) >= 5].sort_values('time').iterrows():
-                visits = int(pd.to_numeric(row.get(vc_col, 0), errors='coerce') or 0)
-                loyal_parts.append(f"{row.get('guest_name', 'Guest')} ({row.get('time', '?')}, {visits} visits)")
+        _has_tier_data = ('loyalty_tier' in df_filtered.columns and
+                          df_filtered['loyalty_tier'].notna().any() and
+                          (df_filtered['loyalty_tier'] != '').any())
+        if _has_tier_data:
+            for _, row in df_filtered[df_filtered['loyalty_tier'].notna() & (df_filtered['loyalty_tier'] != '')].sort_values(_sort_cols).iterrows():
+                loyal_parts.append(f"{row.get('guest_name', 'Guest')} ({_when(row)}, {row.get('loyalty_tier', '')})")
+        else:
+            # Fall back to visit count (calculated from historical reservations + SevenRooms API)
+            _vc_col = next((c for c in ['visit_count', 'total_visits', 'visits'] if c in df_filtered.columns), None)
+            if _vc_col:
+                for _, row in df_filtered[pd.to_numeric(df_filtered[_vc_col], errors='coerce').fillna(0) >= 5].sort_values(_sort_cols).iterrows():
+                    visits = int(pd.to_numeric(row.get(_vc_col, 0), errors='coerce') or 0)
+                    loyal_parts.append(f"{row.get('guest_name', 'Guest')} ({_when(row)}, {visits} visits)")
         if loyal_parts:
             st.markdown(f"**Loyal members:** {', '.join(loyal_parts)}. Please give these guests a particularly warm welcome.")
 
@@ -1113,7 +1214,7 @@ with tab_operations:
             })
 
         if not enriched:
-            st.caption("No room guests today.")
+            st.caption("No room guests for this period." if is_range else "No room guests today.")
             st.markdown("---")
             return
 
@@ -1144,7 +1245,7 @@ with tab_operations:
                     'Check-out': e['checkout_fmt'],
                     'Dining Visits': str(e['visits'][0]) if e['visits'] else '—',
                     'Room Stays': str(e['visits'][1]) if e['visits'] else '—',
-                    'Table Today': f"{e['table_match'].get('time','?')} (party of {e['table_match'].get('party_size','?')})" if e['table_match'] is not None else '—',
+                    'Table Booked': f"{e['table_match'].get('time','?')} (party of {e['table_match'].get('party_size','?')})" if e['table_match'] is not None else '—',
                     'Flags': e['flags'],
                 }
                 table_rows.append(table_row)
@@ -1237,8 +1338,8 @@ with tab_operations:
                 row['Covers'] = current_covers
                 row['Rooms'] = room_count
                 row['Room Guests'] = room_guests
-                row[f'LW Res ({last_week_date.strftime("%d/%m")})'] = lw_res
-                row[f'LW Covers'] = lw_covers
+                row[f'{lw_tag} Res ({lw_date_str})'] = lw_res
+                row[f'{lw_tag} Covers'] = lw_covers
 
                 # By meal period (only for reservations)
                 if has_reservations and 'meal_period' in venue_df.columns:
@@ -1251,14 +1352,14 @@ with tab_operations:
 
             pub_stats = pd.DataFrame(pub_list).sort_values('Covers', ascending=False)
 
-            lw_col = f'LW Res ({last_week_date.strftime("%d/%m")})'
-            col_order = ['Pub', 'Res', 'Covers', 'Rooms', 'Room Guests', lw_col, 'LW Covers']
+            lw_col = f'{lw_tag} Res ({lw_date_str})'
+            col_order = ['Pub', 'Res', 'Covers', 'Rooms', 'Room Guests', lw_col, f'{lw_tag} Covers']
             if has_reservations and 'meal_period' in df_filtered.columns:
                 col_order += ['Breakfast Res', 'Breakfast Covers', 'Lunch Res', 'Lunch Covers', 'Dinner Res', 'Dinner Covers']
             pub_stats = pub_stats[[c for c in col_order if c in pub_stats.columns]]
 
             st.dataframe(pub_stats, use_container_width=True, hide_index=True)
-            st.caption(f"LW = {last_week_date.strftime('%A %d/%m')}")
+            st.caption(f"{lw_tag} = {format_date_range(last_week_from, last_week_to)}")
 
         show_upcoming_functions()
         show_alerts()

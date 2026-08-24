@@ -1,5 +1,4 @@
 # Secrets - never commit these
-config.py
 .streamlit/secrets.toml
 
 # Python
@@ -10,8 +9,8 @@ __pycache__/
 # Virtual environment
 venv/
 
-# Nested repo copy
-chickpea/
+# Generated output files
+output/
 
 # OS
 .DS_Store
