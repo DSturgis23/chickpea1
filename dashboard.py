@@ -272,6 +272,9 @@ if st.sidebar.button("Refresh Data", type="primary") or 'venues' not in st.sessi
             st.session_state['eviivo_historical'] = eviivo_historical or []
             # Build low-rating lookup for alerts
             st.session_state['low_rating_lookup'] = build_low_rating_lookup(feedback_for_alerts)
+            # Bump the data version so the cached df/df_hist below get rebuilt once, not on
+            # every rerun (see process_reservations_df caching note).
+            st.session_state['data_version'] = st.session_state.get('data_version', 0) + 1
             eviivo_msg = f", {len(eviivo_bookings)} room stays" if eviivo_bookings else ""
             st.sidebar.success(f"Loaded {len(venues)} pubs, {len(reservations)} future + {len(historical)} historical reservations{eviivo_msg}")
         else:
@@ -302,7 +305,13 @@ venue_map = {v['id']: v['name'].strip() for v in venues}
 def process_reservations_df(records, venue_map):
     """Apply the standard SevenRooms field mapping to a list of raw reservation records.
     Used for both the upcoming (df) and historical (df_hist) datasets so that guest-level
-    fields (name, table, notes, occasion, loyalty, etc.) are available for any date range."""
+    fields (name, table, notes, occasion, loyalty, etc.) are available for any date range.
+
+    This runs several slow row-wise pandas operations (meal period, loyalty extraction,
+    notes) over thousands of records, so callers should compute it once per data refresh
+    and reuse the result (see st.session_state['df']/['df_hist']) rather than calling this
+    on every rerun — re-running it on every tab switch is what made Analytics/Sales & Food
+    feel like they weren't loading."""
     d = pd.DataFrame(records) if records else pd.DataFrame()
     if len(d) == 0:
         return d
@@ -385,47 +394,62 @@ def process_reservations_df(records, venue_map):
 
 # Build DataFrames — same field mapping applied to both the upcoming window (df) and the
 # historical window (df_hist) so guest-level detail is available for any selected date range.
-df = process_reservations_df(reservations, venue_map)
-df_hist = process_reservations_df(historical, venue_map)
+# Computed once per data refresh (keyed on data_version) and reused from session_state on
+# every other rerun — this is a slow row-wise pandas transform over thousands of records,
+# so redoing it on every widget interaction (e.g. every tab switch) made Analytics/Sales &
+# Food feel like they weren't loading.
+if st.session_state.get('df_version') != st.session_state.get('data_version'):
+    _df = process_reservations_df(reservations, venue_map)
+    _df_hist = process_reservations_df(historical, venue_map)
 
-# === CALCULATE VISIT COUNT FROM HISTORICAL DATA ===
-# Count visits in the last 365 days only (even though we load 400 days for YoY comparisons).
-# This is the reliable source when SevenRooms' loyalty scheme isn't configured.
-if len(df) > 0 and len(df_hist) > 0:
-    _365_cutoff = (datetime.now() - timedelta(days=365)).date()
-    # Only count confirmed/arrived reservations within the last 365 days
-    _hist_ok = df_hist
-    if 'reservation_date' in df_hist.columns:
-        _hist_ok = _hist_ok[_hist_ok['reservation_date'] >= _365_cutoff]
-    if 'status' in _hist_ok.columns:
-        _hist_ok = _hist_ok[~_hist_ok['status'].str.lower().str.contains('cancel|no.show|no-show', na=False)]
+    # === CALCULATE VISIT COUNT FROM HISTORICAL DATA ===
+    # Count visits in the last 365 days only (even though we load 400 days for YoY comparisons).
+    # This is the reliable source when SevenRooms' loyalty scheme isn't configured.
+    # Runs only when the underlying data actually changes (guarded by data_version above) —
+    # it's a row-wise pandas apply over thousands of records, so re-running it on every rerun
+    # (e.g. every tab switch) is what made Analytics/Sales & Food feel like they weren't loading.
+    if len(_df) > 0 and len(_df_hist) > 0:
+        _365_cutoff = (datetime.now() - timedelta(days=365)).date()
+        # Only count confirmed/arrived reservations within the last 365 days
+        _hist_ok = _df_hist
+        if 'reservation_date' in _df_hist.columns:
+            _hist_ok = _hist_ok[_hist_ok['reservation_date'] >= _365_cutoff]
+        if 'status' in _hist_ok.columns:
+            _hist_ok = _hist_ok[~_hist_ok['status'].str.lower().str.contains('cancel|no.show|no-show', na=False)]
 
-    _email_counts: dict = {}
-    _name_counts: dict  = {}
+        _email_counts: dict = {}
+        _name_counts: dict  = {}
 
-    if 'email' in _hist_ok.columns:
-        _ec = _hist_ok[_hist_ok['email'].notna() & (_hist_ok['email'] != '')].copy()
-        _ec['_email_norm'] = _ec['email'].str.lower().str.strip()
-        _email_counts = _ec.groupby('_email_norm').size().to_dict()
+        if 'email' in _hist_ok.columns:
+            _ec = _hist_ok[_hist_ok['email'].notna() & (_hist_ok['email'] != '')].copy()
+            _ec['_email_norm'] = _ec['email'].str.lower().str.strip()
+            _email_counts = _ec.groupby('_email_norm').size().to_dict()
 
-    if 'first_name' in _hist_ok.columns and 'last_name' in _hist_ok.columns:
-        _nc = _hist_ok.copy()
-        _nc['_name_norm'] = (_nc['first_name'].fillna('') + ' ' + _nc['last_name'].fillna('')).str.lower().str.strip()
-        _name_counts = _nc[_nc['_name_norm'].str.len() > 1].groupby('_name_norm').size().to_dict()
+        if 'first_name' in _hist_ok.columns and 'last_name' in _hist_ok.columns:
+            _nc = _hist_ok.copy()
+            _nc['_name_norm'] = (_nc['first_name'].fillna('') + ' ' + _nc['last_name'].fillna('')).str.lower().str.strip()
+            _name_counts = _nc[_nc['_name_norm'].str.len() > 1].groupby('_name_norm').size().to_dict()
 
-    def _hist_visit_count(row):
-        email_norm = str(row.get('email', '') or '').lower().strip()
-        name_norm  = (str(row.get('first_name', '') or '') + ' ' + str(row.get('last_name', '') or '')).lower().strip()
-        return max(_email_counts.get(email_norm, 0), _name_counts.get(name_norm, 0))
+        def _hist_visit_count(row):
+            email_norm = str(row.get('email', '') or '').lower().strip()
+            name_norm  = (str(row.get('first_name', '') or '') + ' ' + str(row.get('last_name', '') or '')).lower().strip()
+            return max(_email_counts.get(email_norm, 0), _name_counts.get(name_norm, 0))
 
-    _hist_vc = df.apply(_hist_visit_count, axis=1)
-    # Use whichever is higher: API-reported count or our own historical count
-    df['visit_count'] = df['visit_count_api'].combine(_hist_vc, max)
-    # Also populate on df_hist itself so the "Loyal members" fallback still works when the
-    # Operations date range picker is set to a wholly historical period.
-    df_hist['visit_count'] = df_hist['visit_count_api'].combine(df_hist.apply(_hist_visit_count, axis=1), max)
-elif len(df) > 0:
-    df['visit_count'] = df['visit_count_api']
+        _hist_vc = _df.apply(_hist_visit_count, axis=1)
+        # Use whichever is higher: API-reported count or our own historical count
+        _df['visit_count'] = _df['visit_count_api'].combine(_hist_vc, max)
+        # Also populate on df_hist itself so the "Loyal members" fallback still works when the
+        # Operations date range picker is set to a wholly historical period.
+        _df_hist['visit_count'] = _df_hist['visit_count_api'].combine(_df_hist.apply(_hist_visit_count, axis=1), max)
+    elif len(_df) > 0:
+        _df['visit_count'] = _df['visit_count_api']
+
+    st.session_state['df'] = _df
+    st.session_state['df_hist'] = _df_hist
+    st.session_state['df_version'] = st.session_state.get('data_version')
+
+df = st.session_state['df']
+df_hist = st.session_state['df_hist']
 
 # Combined dataset spanning both the upcoming window (df: today → +90 days) and the
 # historical window (df_hist: -400 days → yesterday) — lets the Operations date range
@@ -1122,46 +1146,65 @@ with tab_operations:
         eviivo_hist = st.session_state.get('eviivo_historical', [])
         df_eviivo_hist = pd.DataFrame(eviivo_hist) if eviivo_hist else pd.DataFrame()
 
+        def _identifier_index(dframe, email_col, phone_col, name_col):
+            """Map normalized email/phone/name -> set of row indices, built once per
+            historical dataset instead of scanning the whole table per guest (the old
+            per-guest `df_hist.iterrows()` here was O(guests x historical rows) — with
+            55 room guests and 4400+ historical rows that's 200k+ Python-level row
+            iterations on every single rerun, which is what made the dashboard feel
+            like Analytics/Sales & Food weren't loading)."""
+            by_email, by_phone, by_name = {}, {}, {}
+            if len(dframe) == 0:
+                return by_email, by_phone, by_name
+            if email_col in dframe.columns:
+                s = dframe[email_col].astype(str).str.lower().str.strip()
+                by_email = s[s != ''].groupby(s).groups
+            if phone_col in dframe.columns:
+                s = dframe[phone_col].astype(str).str.replace(r'\D', '', regex=True)
+                by_phone = s[s != ''].groupby(s).groups
+            if name_col in dframe.columns:
+                s = dframe[name_col].astype(str).str.lower().str.strip()
+                by_name = s[s != ''].groupby(s).groups
+            return by_email, by_phone, by_name
+
+        _dining_by_email, _dining_by_phone, _dining_by_name = _identifier_index(df_hist, 'email', 'phone_number', 'guest_name')
+        _rooms_by_email, _rooms_by_phone, _rooms_by_name = _identifier_index(df_eviivo_hist, 'email', 'phone', 'guest_name')
+
         def count_visits(guest_email, guest_phone, guest_name):
-            dining = 0
-            rooms  = 0
             norm_email = str(guest_email).lower().strip() if guest_email else ''
             norm_phone = re.sub(r'\D', '', str(guest_phone)) if guest_phone else ''
             norm_name = str(guest_name).lower().strip() if guest_name else ''
 
-            def matches_row(row_email, row_phone, row_name):
-                if norm_email and str(row_email).lower().strip() == norm_email:
-                    return True
-                if norm_phone and re.sub(r'\D', '', str(row_phone)) == norm_phone:
-                    return True
-                if norm_name and str(row_name).lower().strip() == norm_name:
-                    return True
-                return False
+            def matching_row_count(by_email, by_phone, by_name):
+                idx = set()
+                if norm_email and norm_email in by_email:
+                    idx.update(by_email[norm_email])
+                if norm_phone and norm_phone in by_phone:
+                    idx.update(by_phone[norm_phone])
+                if norm_name and norm_name in by_name:
+                    idx.update(by_name[norm_name])
+                return len(idx)
 
-            if len(df_hist) > 0:
-                for _, r in df_hist.iterrows():
-                    if matches_row(r.get('email',''), r.get('phone_number',''), r.get('guest_name','')):
-                        dining += 1
-            if len(df_eviivo_hist) > 0:
-                for _, r in df_eviivo_hist.iterrows():
-                    if matches_row(r.get('email',''), r.get('phone',''), r.get('guest_name','')):
-                        rooms += 1
+            dining = matching_row_count(_dining_by_email, _dining_by_phone, _dining_by_name)
+            rooms = matching_row_count(_rooms_by_email, _rooms_by_phone, _rooms_by_name)
             return (dining, rooms) if (dining + rooms) > 0 else None
 
         def find_table_booking(guest_email, guest_phone, guest_name):
             if len(df_filtered) == 0:
                 return None
+            guest_email = str(guest_email).lower().strip() if guest_email and pd.notna(guest_email) else ''
+            guest_name = str(guest_name).lower().strip() if guest_name and pd.notna(guest_name) else ''
             for _, row in df_filtered.iterrows():
                 res_email = str(row.get('email', '') or '').lower().strip()
                 res_phone = re.sub(r'\D', '', str(row.get('phone_number', '') or ''))
                 res_name = str(row.get('guest_name', '') or '').lower().strip()
-                if guest_email and res_email and guest_email.lower().strip() == res_email:
+                if guest_email and res_email and guest_email == res_email:
                     return row
                 if guest_phone and res_phone:
                     norm = re.sub(r'\D', '', str(guest_phone))
                     if norm and norm == res_phone:
                         return row
-                if guest_name and res_name and guest_name.lower().strip() == res_name:
+                if guest_name and res_name and guest_name == res_name:
                     return row
             return None
 
@@ -1170,9 +1213,12 @@ with tab_operations:
         # Build enriched list of all room guests
         enriched = []
         for _, room in df_eviivo.sort_values(['venue_name', 'detail']).iterrows():
-            email = room.get('email', '') or ''
-            phone = room.get('phone', '') or ''
+            email = room.get('email', '')
+            email = str(email) if email and pd.notna(email) else ''
+            phone = room.get('phone', '')
+            phone = str(phone) if phone and pd.notna(phone) else ''
             guest_name = room.get('guest_name', 'Guest')
+            guest_name = str(guest_name) if guest_name and pd.notna(guest_name) else 'Guest'
             clean_note = clean_eviivo_note(room.get('notes', '') or '')
             has_note = bool(clean_note) and len(clean_note) > 3
             visits = count_visits(email, phone, guest_name)
