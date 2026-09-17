@@ -4,3 +4,4 @@ requests
 plotly
 reportlab
 openpyxl
+matplotlib
