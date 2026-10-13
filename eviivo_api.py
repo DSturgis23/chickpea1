@@ -325,10 +325,8 @@ class EviivoClient:
 
 # Test connection
 if __name__ == "__main__":
-    # Use test environment credentials
+    # Test environment: set EVIIVO_CLIENT_ID / EVIIVO_CLIENT_SECRET in your shell first (never commit keys)
     import os
-    os.environ["EVIIVO_CLIENT_ID"] = "d0c7d698-15b3-4b72-8ca9-b3229611ebdc"
-    os.environ["EVIIVO_CLIENT_SECRET"] = "T0BHKUEXZ6csLSvtseQP"
     os.environ["EVIIVO_AUTH_URL"] = "https://qaext-auth.eviivo.com/api/connect/token"
     os.environ["EVIIVO_API_URL"] = "https://qaext-io.eviivo.com/pms/v2"
 

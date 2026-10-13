@@ -5,8 +5,9 @@ import requests
 import json
 from datetime import datetime, timedelta
 
-CLIENT_ID = "dcc8dabbbd8de6f13b9831b31535eac35f0792ba6caec7cd2418fb72d1cc90acac580700da9861dfa64f17988b3dcbdd651e3e5fcd626aeb1e70689a37daa962"
-CLIENT_SECRET = "40590241a64c8988a36341b5245c04eaaac175d3742ab8e09bea7b7fd46cdf56dda467c75934b5a2c557725a4411efad473a0d54747a2aa6291e6a21c7d21d51"
+import os as _os, sys as _sys
+_sys.path.insert(0, _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "..", ".."))
+from chickpea_creds import SR_CLIENT_ID as CLIENT_ID, SR_CLIENT_SECRET as CLIENT_SECRET  # gitignored, never commit keys
 API_BASE_URL = "https://api.sevenrooms.com/2_4"
 
 def h(token):

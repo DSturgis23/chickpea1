@@ -7,8 +7,8 @@ from datetime import date
 
 # QA environment credentials
 AUTH_URL = "https://qaext-auth.eviivo.com/api/connect/token"
-CLIENT_ID = "d0c7d698-15b3-4b72-8ca9-b3229611ebdc"
-CLIENT_SECRET = "T0BHKUEXZ6csLSvtseQP"
+CLIENT_ID = ""      # QA credentials removed: set locally, never commit
+CLIENT_SECRET = ""
 PROPERTY_NAME = "specialen1"
 
 def test_connection():
